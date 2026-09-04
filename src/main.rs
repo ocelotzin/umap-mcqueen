@@ -10,6 +10,8 @@ use fast_umap::prelude::*;
 //Para graficar
 use textplots::{Chart, Plot, Shape};
 
+//Para clustering
+
 //Tamaño de entrenamiento y lotes, deben poder ser puestas por el usuario
 const TRAIN_SIZE: usize = 400;
 const BATCH_SIZE: usize = 150;
@@ -52,10 +54,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    //Crear encaje primario
     let fitted = umap.fit(buffer.clone(), None); // UMAPEAR
     let encaje = fitted.embedding();
     println!("Dimensión reducida del encaje primario: {} × {}", encaje.len(), encaje[0].len());
-
+                                   
     buffer.clear();
 
     for (i, result) in records { // seguimos con el archivo
@@ -68,8 +71,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         buffer.push(fila);
 
         if buffer.len() == BATCH_SIZE {
-            let nuevo_embedding = fitted.transform(buffer.clone()); // Nuevo embedding parametrica
-
+            let nuevo_embedding = fitted.transform(buffer.clone()); // Nuevo embedding parametrico
+  
             let puntos: Vec<(f32, f32)> = nuevo_embedding // Para graficar el embedding, 
                 .iter()
                 .map(|fila| (fila[0] as f32, fila[1] as f32))
@@ -78,6 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let xs: Vec<f32> = puntos.iter().map(|p| p.0).collect();
             let xmin = xs.iter().cloned().fold(f32::INFINITY, f32::min);
             let xmax = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
 
             println!("--- Embedding en el índice {} ---", i);
             Chart::new(120, 80, xmin, xmax)
