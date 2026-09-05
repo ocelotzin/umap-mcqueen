@@ -11,6 +11,7 @@ use fast_umap::prelude::*;
 use textplots::{Chart, Plot, Shape};
 
 //Para clustering
+use clump::Hdbscan;
 
 //Tamaño de entrenamiento y lotes, deben poder ser puestas por el usuario
 const TRAIN_SIZE: usize = 400;
@@ -73,22 +74,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         if buffer.len() == BATCH_SIZE {
             let nuevo_embedding = fitted.transform(buffer.clone()); // Nuevo embedding parametrico
   
-            let puntos: Vec<(f32, f32)> = nuevo_embedding // Para graficar el embedding, 
-                .iter()
-                .map(|fila| (fila[0] as f32, fila[1] as f32))
-                .collect();
 
-            let xs: Vec<f32> = puntos.iter().map(|p| p.0).collect();
-            let xmin = xs.iter().cloned().fold(f32::INFINITY, f32::min);
-            let xmax = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let puntos_f32: Vec<Vec<f32>> = nuevo_embedding
+            .iter()
+            .map(|fila| vec![fila[0] as f32, fila[1] as f32])
+            .collect();
+
+        // HDBSCAN corre desde cero en cada lote (no es streaming)
+        let hdbscan = Hdbscan::new().with_min_samples(2).with_min_cluster_size(2);
+        let labels = hdbscan.fit_predict(&puntos_f32)?;
+
+        // Número de clusters: etiqueta máxima + 1, ignorando ruido (usize::MAX)
+        let n_clusters = labels
+            .iter()
+            .filter(|&&l| l != usize::MAX)
+            .copied()
+            .max()
+            .map_or(0, |m| m.saturating_add(1));
+
+        println!("--- Lote en índice {}: {} clusters ---", i, n_clusters);
+
+        let puntos: Vec<(f32, f32)> = nuevo_embedding // Para graficar el embedding, 
+            .iter()
+            .map(|fila| (fila[0] as f32, fila[1] as f32))
+            .collect();
+
+        let xs: Vec<f32> = puntos.iter().map(|p| p.0).collect();
+        let xmin = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let xmax = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
 
-            println!("--- Embedding en el índice {} ---", i);
-            Chart::new(120, 80, xmin, xmax)
-                .lineplot(&Shape::Points(&puntos))
-                .display();
+        println!("--- Embedding en el índice {} ---", i);
+        Chart::new(120, 80, xmin, xmax)
+            .lineplot(&Shape::Points(&puntos))
+            .display();
 
-            buffer.clear();
+        buffer.clear();
         }
     }
 
