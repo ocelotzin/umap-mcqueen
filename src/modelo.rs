@@ -18,6 +18,7 @@
 //! Este módulo añade un **manifiesto** junto a los pesos y una carga que **falla**
 //! cuando no corresponden. No sustituye a `fast_umap::serialize`: lo envuelve.
 
+use crate::normaliza::{Normalizador, NormalizadorDeEntrada};
 use fast_umap::backend::AutodiffBackend;
 use fast_umap::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,19 @@ pub struct Manifiesto {
     /// Segundos desde el epoch. Sin `chrono`: no hace falta una dependencia
     /// para un sello de tiempo.
     pub guardado_en: u64,
+    /// Referencia de normalizacion medida sobre el encaje de entrenamiento.
+    ///
+    /// Va aqui y no aparte porque es parte de lo que hace comparables dos
+    /// sesiones: los mismos pesos con distinta referencia dan coordenadas
+    /// distintas. Y porque `embedding()` de un modelo cargado viene vacio, asi
+    /// que al cargar no hay forma de volver a medirla.
+    pub normalizacion: Option<Normalizador>,
+    /// Referencia de normalizacion de la ENTRADA de la red.
+    ///
+    /// `fast-umap` 1.6.0 entrena sobre datos normalizados y en inferencia recibe
+    /// datos crudos (ver `normaliza::NormalizadorDeEntrada`). Hay que aplicarla a
+    /// mano antes de `transform`, y tiene que ser la del entrenamiento.
+    pub normalizacion_de_entrada: Option<NormalizadorDeEntrada>,
 }
 
 /// Qué no cuadra entre lo que se pide y lo que hay guardado.
@@ -95,9 +109,14 @@ pub fn huella(datos: &[Vec<f64>]) -> String {
 
 impl Manifiesto {
     /// Construye el manifiesto que describe un entrenamiento concreto.
-    pub fn de(config: &UmapConfig, datos: &[Vec<f64>]) -> Self {
+    pub fn de(
+        config: &UmapConfig,
+        datos: &[Vec<f64>],
+        normalizacion: Option<Normalizador>,
+        normalizacion_de_entrada: Option<NormalizadorDeEntrada>,
+    ) -> Self {
         Self {
-            formato: 1,
+            formato: 3,
             n_components: config.n_components,
             hidden_sizes: config.hidden_sizes.clone(),
             n_neighbors: config.graph.n_neighbors,
@@ -109,6 +128,8 @@ impl Manifiesto {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            normalizacion,
+            normalizacion_de_entrada,
         }
     }
 
@@ -165,6 +186,8 @@ pub fn guarda<B: AutodiffBackend>(
     ajustado: &FittedUmap<B>,
     config: &UmapConfig,
     datos_de_entrenamiento: &[Vec<f64>],
+    normalizacion: Option<Normalizador>,
+    normalizacion_de_entrada: Option<NormalizadorDeEntrada>,
     base: impl AsRef<Path>,
 ) -> Result<RutasDelModelo, Box<dyn Error>> {
     let rutas = RutasDelModelo::de(base);
@@ -179,7 +202,7 @@ pub fn guarda<B: AutodiffBackend>(
         )
         .into());
     }
-    let manifiesto = Manifiesto::de(config, datos_de_entrenamiento);
+    let manifiesto = Manifiesto::de(config, datos_de_entrenamiento, normalizacion, normalizacion_de_entrada);
     std::fs::write(&rutas.manifiesto, serde_json::to_string_pretty(&manifiesto)?)?;
     Ok(rutas)
 }
