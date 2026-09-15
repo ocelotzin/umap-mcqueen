@@ -15,6 +15,9 @@ use clump::DenStream;
 
 //Guardado y carga verificada del modelo
 mod modelo;
+//Normalizacion con referencia fija
+mod normaliza;
+use normaliza::{Normalizador, NormalizadorDeEntrada};
 
 //Tamaño de entrenamiento y lotes, ahora puestos por el usuario desde la línea
 //de órdenes (ver `Opciones`), con estos valores por defecto.
@@ -96,36 +99,6 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
         .collect::<Result<Vec<f64>, _>>()?)
 }
 
-//Normaliza un vector de vectores (data) entre cero y 1
-//con el mínimo (min) y máximo (max) de los datos
-fn normalize(data: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let min = data.iter()
-        .flatten()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-
-    let max = data.iter()
-        .flatten()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    let range = max - min;
-
-    data.iter()
-        .map(|fila| {
-            fila.iter()
-                .map(|&x| {
-                    if range == 0.0 {
-                        0.0 // evita división por cero si todos los valores son iguales
-                    } else {
-                        (x - min) / range
-                    }
-                })
-                .collect()
-        })
-        .collect()
-}
-
 /// La configuración de UMAP, en un sitio, para que entrenar y cargar usen la misma.
 fn configuracion() -> UmapConfig {
     UmapConfig {
@@ -195,7 +168,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
     let n_dim = buffer_crudo[0].len();
 
     //O cargamos un modelo ya entrenado, o entrenamos uno nuevo.
-    let fitted = if opts.cargar {
+    let (fitted, normalizador, normalizador_de_entrada) = if opts.cargar {
         let base = opts.modelo.as_ref().expect("--cargar exige --modelo");
         let (m, manifiesto) = modelo::carga_verificada::<MyAutodiffBackend>(
             base,
@@ -212,20 +185,45 @@ fn corre() -> Result<(), Box<dyn Error>> {
             "⚠ El encaje de entrenamiento NO se guarda: `embedding()` de un modelo \
              cargado está vacío por construcción, no por error."
         );
-        m
+        let norm_entrada = manifiesto.normalizacion_de_entrada.clone().ok_or(
+            "el manifiesto no trae referencia de normalización de ENTRADA. Sin ella, \
+             `transform` recibe datos crudos cuando la red se entrenó con datos \
+             normalizados, y devuelve coordenadas cinco órdenes de magnitud fuera \
+             del encaje (ver normaliza::NormalizadorDeEntrada).",
+        )?;
+        let norm = manifiesto.normalizacion.ok_or(
+            "el manifiesto no trae referencia de normalización (¿formato 1?). Sin ella \
+             las coordenadas de esta sesión no son comparables con las de la sesión que \
+             entrenó el modelo, que es justamente para lo que se guarda.",
+        )?;
+        (m, norm, norm_entrada)
     } else {
         //Reducimos el encaje primario y a la par entrenamos
         let m = fast_umap::Umap::<MyAutodiffBackend>::new(config.clone()).fit(buffer_crudo.clone(), None); // UMAPEAR
+        //La red se entrena sobre datos normalizados por caracteristica; hay que
+        //quedarse con ESA referencia para poder aplicarla luego en `transform`.
+        let norm_entrada = NormalizadorDeEntrada::ajusta(&buffer_crudo).ok_or(
+            "no se pudo medir la normalización de entrada sobre el lote de entrenamiento",
+        )?;
         let encaje = m.embedding();
         println!("Dimensión reducida del encaje primario: {} × {}", encaje.len(), encaje[0].len());
 
+        //La referencia de normalización se mide UNA VEZ, aquí, sobre el encaje de
+        //entrenamiento. Antes se medía por lote, y eso movía el suelo bajo DenStream
+        //más que su propio epsilon (ver `normaliza.rs`).
+        let norm = Normalizador::ajusta(encaje).ok_or(
+            "no se pudo medir la referencia de normalización sobre el encaje de \
+             entrenamiento (¿vacío, o todos los valores iguales?)",
+        )?;
+        println!("Referencia de normalización fijada: [{:.4}, {:.4}]", norm.min, norm.max);
+
         if let Some(base) = &opts.modelo {
-            let rutas = modelo::guarda(&m, &config, &buffer_crudo, base)?;
+            let rutas = modelo::guarda(&m, &config, &buffer_crudo, Some(norm), Some(norm_entrada.clone()), base)?;
             println!("Modelo guardado:");
             println!("  pesos      : {}", rutas.pesos.display());
             println!("  manifiesto : {}", rutas.manifiesto.display());
         }
-        m
+        (m, norm, norm_entrada)
     };
 
     buffer_crudo.clear();
@@ -234,8 +232,17 @@ fn corre() -> Result<(), Box<dyn Error>> {
 
     //Procesa un lote: encaje, normalización, DenStream y gráfica.
     let procesa_lote = |lote: &[Vec<f64>], i: usize, ds: &mut DenStream, total: &mut Vec<(f32, f32)>| {
-        let nuevo_embedding = fitted.transform(lote.to_vec()); // Nuevo embedding UMAP
-        let embedding_normalizado = normalize(nuevo_embedding);
+        //`fast-umap` NO normaliza en `transform`, aunque sí lo hace al entrenar.
+        //Sin esta línea la red recibe datos crudos y devuelve coordenadas cinco
+        //órdenes de magnitud fuera del encaje.
+        let entrada = normalizador_de_entrada
+            .aplica(lote.to_vec())
+            .expect("la dimensión del lote no corresponde al modelo");
+        let nuevo_embedding = fitted.transform(entrada); // Nuevo embedding UMAP
+        //Referencia FIJA, la del entrenamiento: es lo que hace que un punto caiga
+        //siempre en la misma coordenada, llegue en el lote que llegue.
+        let embedding_normalizado = normalizador.aplica(nuevo_embedding);
+        let fuera = normalizador.fuera_de_rango(&embedding_normalizado);
 
         //Tenemos que normalizar los datos de salida, esto para que
         //DenStream trabaje bajo los parametros dados.
@@ -246,7 +253,12 @@ fn corre() -> Result<(), Box<dyn Error>> {
 
         let _ = ds.update_batch(&puntos_f32);
 
-        println!("--- Lote en índice {}: {} micro clusters ---", i, ds.n_clusters());
+        //Con referencia fija, salirse de [0,1] deja de ser imposible y pasa a ser
+        //una señal: si crece, el modelo ya no representa lo que llega.
+        println!(
+            "--- Lote en índice {}: {} micro clusters · {:.1}% fuera de [0,1] ---",
+            i, ds.n_clusters(), 100.0 * fuera
+        );
 
         let puntos: Vec<(f32, f32)> = embedding_normalizado // Para graficar el embedding,
             .iter()
