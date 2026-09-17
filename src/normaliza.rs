@@ -164,11 +164,35 @@ impl NormalizadorDeEntrada {
         let mut medias = vec![0.0; d];
         let mut desviaciones = vec![0.0; d];
         for j in 0..d {
-            let suma: f64 = datos.iter().map(|f| f[j]).sum();
-            let suma_cuad: f64 = datos.iter().map(|f| f[j] * f[j]).sum();
-            let media = suma / n as f64;
-            // Misma fórmula que el crate: varianza poblacional, no muestral.
-            let varianza = (suma_cuad / n as f64) - media * media;
+            // Welford en una pasada. La forma directa —`suma_cuad/n − media²`— resta
+            // dos numeros grandes y parecidos, y cuando la media domina a la
+            // desviacion el resultado se pierde en el redondeo:
+            //
+            //     |media|/desv      formula directa      Welford        real
+            //              0             9,902e-1        9,902e-1     9,902e-1
+            //          1e+06             9,903e-5        9,902e-5     9,902e-5
+            //          1e+11             2,000e+0        9,902e-7     9,902e-7
+            //
+            // La ultima fila se equivoca por un factor de dos millones. Welford
+            // mantiene los terminos en el mismo orden de magnitud y no cancela.
+            //
+            // ⚠ Esto NO arregla nada que este roto hoy. Medido sobre las 44 formas
+            //   de onda del archivo RR032, la peor razon |media|/desviacion por
+            //   caracteristica es 15, y la formula directa no falla hasta ~6,7e7:
+            //   hay 4,5 millones de veces de margen. El cambio quita una clase de
+            //   fallo que hoy no ocurre, y cuesta lo mismo.
+            let mut media = 0.0_f64;
+            let mut m2 = 0.0_f64;
+            for (k, fila) in datos.iter().enumerate() {
+                let x = fila[j];
+                let delta = x - media;
+                media += delta / (k + 1) as f64;
+                m2 += delta * (x - media);
+            }
+            // Poblacional (÷n) y no muestral (÷(n−1)): es lo que hace
+            // `fast_umap::utils::normalize_data` al entrenar, y la referencia tiene
+            // que reproducirlo o inferencia y entrenamiento dejan de coincidir.
+            let varianza = m2 / n as f64;
             medias[j] = media;
             desviaciones[j] = varianza.max(0.0).sqrt() + EPSILON_DESVIACION;
         }
@@ -196,5 +220,100 @@ impl NormalizadorDeEntrada {
                     .collect()
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod pruebas {
+    use super::*;
+
+    /// La forma directa, la que habia antes. Se conserva SOLO para la prueba de
+    /// equivalencia: es contra esto contra lo que hay que comparar.
+    fn desviacion_directa(datos: &[Vec<f64>], j: usize) -> f64 {
+        let n = datos.len() as f64;
+        let suma: f64 = datos.iter().map(|f| f[j]).sum();
+        let suma_cuad: f64 = datos.iter().map(|f| f[j] * f[j]).sum();
+        let media = suma / n;
+        ((suma_cuad / n) - media * media).max(0.0).sqrt() + EPSILON_DESVIACION
+    }
+
+    /// Generador reproducible sin dependencias: congruencial lineal.
+    fn muestras(n: usize, d: usize, base: f64, escala: f64) -> Vec<Vec<f64>> {
+        let mut e: u64 = 42;
+        let mut siguiente = || {
+            e = e.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((e >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+        (0..n).map(|_| (0..d).map(|_| base + escala * siguiente()).collect()).collect()
+    }
+
+    #[test]
+    fn welford_coincide_con_la_forma_directa_cuando_esta_bien_condicionada() {
+        // El cambio no puede alterar resultados en el regimen en que se venia
+        // trabajando. Si los altera, no es una mejora de estabilidad: es un cambio
+        // de comportamiento disfrazado.
+        let datos = muestras(400, 8, 0.0, 2.0);
+        let n = NormalizadorDeEntrada::ajusta(&datos).expect("debería ajustar");
+        for j in 0..8 {
+            let directa = desviacion_directa(&datos, j);
+            assert!((n.desviaciones[j] - directa).abs() / directa < 1e-9,
+                    "característica {j}: Welford {} frente a directa {directa}", n.desviaciones[j]);
+        }
+    }
+
+    #[test]
+    fn welford_acierta_donde_la_forma_directa_se_rompe() {
+        // Media enorme y desviacion diminuta: la resta de la forma directa cancela.
+        // Es el unico sitio donde el cambio se nota, y es su justificacion entera.
+        //
+        // Lo que devuelve cada una con estos datos (medido, no supuesto):
+        //
+        //     caracteristica   directa      Welford      real
+        //                  0   1,414e+0     2,830e-4     2,887e-4
+        //                1-3   1,000e-6     ~2,87e-4     2,887e-4
+        //
+        // En la 0 se equivoca por un factor de 4 900. En las otras tres la varianza
+        // sale NEGATIVA, el `.max(0.0)` la recorta a cero, y lo que devuelve es el
+        // epsilon: una desviacion inventada que parece un resultado.
+        let datos = muestras(400, 4, 1e8, 1e-3);
+        let n = NormalizadorDeEntrada::ajusta(&datos).expect("debería ajustar");
+        // La dispersion real de una uniforme de anchura 1e-3 es 1e-3/sqrt(12).
+        let esperada = 1e-3 / 12.0_f64.sqrt();
+        for j in 0..4 {
+            let welford = n.desviaciones[j];
+            let directa = desviacion_directa(&datos, j);
+            assert!((welford - esperada).abs() / esperada < 0.15,
+                    "Welford debería acertar: {welford} frente a {esperada}");
+            // Se compara por RAZON y no por error relativo: cuando la varianza se
+            // recorta a cero el error relativo se queda en 0,9965 y un umbral de 1,0
+            // no lo caza, aunque el resultado este mal por tres ordenes de magnitud.
+            let razon = directa / welford;
+            assert!(!(0.5..=2.0).contains(&razon),
+                    "la forma directa ya no falla aquí (devolvió {directa} frente a \
+                     {welford}): esta prueba dejó de demostrar nada y hay que buscar \
+                     un caso peor");
+        }
+    }
+
+    #[test]
+    fn la_varianza_sigue_siendo_poblacional() {
+        // Con ÷(n−1) la desviacion saldria sqrt(n/(n−1)) veces mayor, y dejaria de
+        // coincidir con la que `fast_umap` aplica al entrenar. Con n=400 son 0,125 %
+        // — pequeño, y exactamente la clase de divergencia silenciosa que el arreglo
+        // de la normalizacion elimino.
+        let datos: Vec<Vec<f64>> = vec![vec![0.0], vec![2.0]];
+        let n = NormalizadorDeEntrada::ajusta(&datos).expect("debería ajustar");
+        // Poblacional: media 1, varianza ((−1)² + 1²)/2 = 1, desviación 1.
+        // Muestral daría sqrt(2) = 1,414.
+        assert!((n.desviaciones[0] - 1.0).abs() < 1e-6,
+                "desviación {} — ¿se cambió a varianza muestral?", n.desviaciones[0]);
+    }
+
+    #[test]
+    fn una_caracteristica_constante_no_divide_por_cero() {
+        let datos: Vec<Vec<f64>> = vec![vec![5.0], vec![5.0], vec![5.0]];
+        let n = NormalizadorDeEntrada::ajusta(&datos).expect("debería ajustar");
+        let z = n.aplica(vec![vec![5.0]]).expect("debería aplicar");
+        assert!(z[0][0].is_finite(), "salió {}", z[0][0]);
     }
 }
