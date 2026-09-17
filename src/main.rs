@@ -55,7 +55,7 @@ fn normalize(data: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
 
-    let file = "/home/oce/proy/umap-mcqueen/data/Waveforms.csv"; // Archivo de ondas
+    let file = "/home/oce/Documentos/proy/umap-mcqueen/data/Waveforms.csv"; // Archivo de ondas
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
