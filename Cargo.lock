@@ -6146,6 +6146,9 @@ dependencies = [
  "csv",
  "cubecl",
  "fast-umap",
+ "serde",
+ "serde_json",
+ "sha2",
  "textplots",
 ]
 
