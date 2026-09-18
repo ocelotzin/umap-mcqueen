@@ -28,18 +28,12 @@ const BATCH_SIZE: usize = 200;
 type MyBackend = burn::backend::wgpu::CubeBackend<WgpuRuntime, f32, i32, u32>;
 type MyAutodiffBackend = burn::backend::Autodiff<MyBackend>;
 
-/// Lo que el usuario puede decidir sin recompilar.
-///
-/// Antes el CSV era una constante con una ruta absoluta de la máquina de su autor,
-/// así que el programa no corría en ninguna otra parte sin editar el fuente.
+//Opciones de uso
 struct Opciones {
-    csv: String,
-    train_size: usize,
-    batch_size: usize,
-    /// Ruta base del modelo. La extensión se ignora: se escriben `<base>.bin`
-    /// (pesos) y `<base>.json` (manifiesto).
-    modelo: Option<String>,
-    /// Cargar el modelo de `modelo` en vez de entrenar uno nuevo.
+    csv: String, //Ruta del dataset
+    train_size: usize, // Lote de entrenamiento
+    batch_size: usize, // Lote de trabajo
+    modelo: Option<String>, // Pesos y datos del modelo a usar
     cargar: bool,
 }
 
@@ -52,8 +46,10 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --lote <n>        tamaño de lote (por defecto 200)
 ";
 
+//Argumentos de ejecución, regresa una variable tipo opciones y comprueba que
+//dadas opciones sean válidas.
 fn opciones() -> Result<Opciones, Box<dyn Error>> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1); //Iterador sobre los argumentos dados
     let mut o = Opciones {
         csv: String::new(),
         train_size: TRAIN_SIZE,
@@ -84,14 +80,12 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
     Ok(o)
 }
 
-/// Lector de CSV **sin cabecera**.
-///
-/// `ReaderBuilder::new()` asume `has_headers(true)` por defecto, y estos ficheros
-/// no traen cabecera: la primera forma de onda de cada uno se perdía en silencio.
+//Crea un lector
 fn lector(ruta: &str) -> Result<csv::Reader<File>, Box<dyn Error>> {
     Ok(ReaderBuilder::new().has_headers(false).from_reader(File::open(ruta)?))
 }
 
+//Del lctor toma un registro y lo convierte en filas
 fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
     Ok(registro
         .iter()
@@ -100,6 +94,8 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
 }
 
 /// La configuración de UMAP, en un sitio, para que entrenar y cargar usen la misma.
+// No entiendo esta función, simplemente podríamos crear una variable con esto
+// esta es una función constante.
 fn configuracion() -> UmapConfig {
     UmapConfig {
         n_components: 2,
@@ -120,22 +116,24 @@ fn configuracion() -> UmapConfig {
     }
 }
 
-/// Envoltura fina: `main` devolviendo `Result` imprime el error con `Debug`, y los
-/// saltos de linea salen como `\n` literales. Estos mensajes llevan una lista de
-/// discrepancias, asi que conviene que se lean.
+// Procesa los errores en el loop principal para facilitar su lectura
+// revisar si esta práctica es común y eficiente
 fn main() {
-    if let Err(e) = corre() {
+    if let Err(e) = main_err() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
 
-fn corre() -> Result<(), Box<dyn Error>> {
+fn main_err() -> Result<(), Box<dyn Error>> {
     let opts = opciones()?;
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
 
+    // Única vez en la que se va a usar la función que pasa la configuración,
+    // por este motivo sugiero quitar esta complejidad extra, DenStream es
+    // un ejemplo de por qué esta configuración es una variable mutable.
     let config = configuracion();
 
     //Configuración DenStream
@@ -181,6 +179,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
             manifiesto.n_entrenamiento,
             &manifiesto.huella_datos[..12]
         );
+        // Esto suena mucho a ia, y es comportamiento esperado en la documentación
         println!(
             "⚠ El encaje de entrenamiento NO se guarda: `embedding()` de un modelo \
              cargado está vacío por construcción, no por error."
@@ -194,7 +193,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
         let norm = manifiesto.normalizacion.ok_or(
             "el manifiesto no trae referencia de normalización (¿formato 1?). Sin ella \
              las coordenadas de esta sesión no son comparables con las de la sesión que \
-             entrenó el modelo, que es justamente para lo que se guarda.",
+             entrenó el modelo.",
         )?;
         (m, norm, norm_entrada)
     } else {
