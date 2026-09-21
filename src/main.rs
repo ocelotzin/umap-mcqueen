@@ -165,7 +165,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     }
     let n_dim = buffer_crudo[0].len();
 
-    //O cargamos un modelo ya entrenado, o entrenamos uno nuevo.
+    //Crea el encaje primario y parámetros de normalización en base a dos casos:
     let (fitted, normalizador, normalizador_de_entrada) = if opts.cargar {
         let base = opts.modelo.as_ref().expect("--cargar exige --modelo");
         let (m, manifiesto) = modelo::carga_verificada::<MyAutodiffBackend>(
@@ -288,6 +288,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     //formas de onda del final del fichero no se procesaban nunca.
     if !buffer_crudo.is_empty() {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
+        if 
         procesa_lote(&buffer_crudo, ultimo, &mut ds, &mut total_puntos);
     }
 
