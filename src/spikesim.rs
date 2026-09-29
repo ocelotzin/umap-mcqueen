@@ -1,132 +1,124 @@
-// Genera un conjunto de Vectores n dimensionales distribuidos bajo
-// la T-student para simular conjuntos de spikes de neuronas
+//! Módulo para generar vectores de `DIM` dimensiones a partir de una
+//! MEZCLA de distribuciones t de Student ("distribuciones empalmadas").
+//!
+//! Uso típico:
+//! ```ignore
+//! mod spikesim;
+//! use spikesim::{ComponenteT, GeneradorMezclaT};
+//!
+//! // Componentes definidos a mano:
+//! let mut gen = GeneradorMezclaT::new(vec![
+//!     ComponenteT::simetrica(3.0, 0.0, 1.0, 0.5),
+//! ]);
+//!
+//! // O con n distribuciones de parámetros aleatorios, reproducibles vía semilla:
+//! let mut gen2 = GeneradorMezclaT::aleatorio(5, 42);
+//! let v = gen2.generar_vector();
+//! ```
 
+use rand::distributions::Uniform;
+use rand::rngs::StdRng;
+use rand::{Rng as _, SeedableRng};
+use rand_distr::{Distribution, StudentT};
 
-use std::io::{self, BufRead, Write};
+pub const DIM: usize = 22;
 
-const DIM: usize = 22;
-
-// ------------------------- Generador aleatorio -------------------------
-struct Rng {
-    s0: u64,
-    s1: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        // splitmix64 para expandir una sola semilla en el estado inicial
-        let mut z = seed;
-        let mut splitmix = move || {
-            z = z.wrapping_add(0x9E3779B97F4A7C15);
-            let mut x = z;
-            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-            x ^ (x >> 31)
-        };
-        let s0 = splitmix();
-        let mut s1 = splitmix();
-        if s1 == 0 {
-            s1 = 0xA5A5A5A5A5A5A5A5;
-        }
-        Rng { s0, s1 }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let s0 = self.s0;
-        let mut s1 = self.s1;
-        let result = s0.wrapping_add(s1);
-        s1 ^= s0;
-        self.s0 = s0.rotate_left(55) ^ s1 ^ (s1 << 14);
-        self.s1 = s1.rotate_left(36);
-        result
-    }
-
-    /// Uniforme en (0, 1),
-    fn next_f64(&mut self) -> f64 {
-        let bits = self.next_u64() >> 11; // 53 bits de mantisa
-        let u = (bits as f64) * (1.0 / (1u64 << 53) as f64);
-        if u <= 0.0 {
-            1e-300
-        } else if u >= 1.0 {
-            1.0 - 1e-16
-        } else {
-            u
-        }
-    }
-
-    /// Normal estándar N(0,1) mediante la transformación de Box-Muller.
-    fn next_normal(&mut self) -> f64 {
-        let u1 = self.next_f64();
-        let u2 = self.next_f64();
-        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-    }
-
-    /// Variable Gamma(shape, escala=1) mediante Marsaglia-Tsang (2000).
-    /// Válido para cualquier shape > 0.
-    fn next_gamma(&mut self, shape: f64) -> f64 {
-        if shape < 1.0 {
-            // Truco de "boost": Gamma(shape) = Gamma(shape+1) * U^(1/shape)
-            let u = self.next_f64();
-            return self.next_gamma(shape + 1.0) * u.powf(1.0 / shape);
-        }
-        let d = shape - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * d).sqrt();
-        loop {
-            let mut x;
-            let mut v;
-            loop {
-                x = self.next_normal();
-                v = 1.0 + c * x;
-                if v > 0.0 {
-                    break;
-                }
-            }
-            v = v * v * v;
-            let u = self.next_f64();
-            if u < 1.0 - 0.0331 * x * x * x * x {
-                return d * v;
-            }
-            if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
-                return d * v;
-            }
-        }
-    }
-
-    /// Chi-cuadrada con `df` grados de libertad (df puede ser no entero).
-    fn next_chi2(&mut self, df: f64) -> f64 {
-        2.0 * self.next_gamma(df / 2.0)
-    }
-
-    /// t de Student estándar (media 0, escala 1) con `df` grados de libertad.
-    fn next_student_t(&mut self, df: f64) -> f64 {
-        let z = self.next_normal();
-        let chi2 = self.next_chi2(df);
-        z / (chi2 / df).sqrt()
-    }
-}
-
-// ------------------------- Modelo de mezcla -------------------------
+// Rangos por defecto usados al generar componentes con parámetros
+// aleatorios (ajustable)
+const DF_MIN: f64 = 2.0;
+const DF_MAX: f64 = 30.0;
+const MEDIA_MIN: f64 = -5.0;
+const MEDIA_MAX: f64 = 5.0;
+const ESCALA_MIN: f64 = 0.1;
+const ESCALA_MAX: f64 = 3.0;
+const PESO_MIN: f64 = 0.1;
+const PESO_MAX: f64 = 1.0;
 
 /// Una de las distribuciones t "empalmadas" (componente de la mezcla).
-#[derive(Clone)]
-struct ComponenteT {
-    df: f64,             // grados de libertad (>0; a menor df, colas más pesadas)
-    medias: [f64; DIM],  // ubicación (mu) por dimensión
-    escalas: [f64; DIM], // escala (sigma) por dimensión, debe ser > 0
-    peso: f64,           // peso relativo dentro de la mezcla (no hace falta que sumen 1)
+#[derive(Clone, Debug)]
+pub struct ComponenteT {
+    pub df: f64,             // grados de libertad (>0; a menor df, colas más pesadas)
+    pub medias: [f64; DIM],  // ubicación (mu) por dimensión
+    pub escalas: [f64; DIM], // escala (sigma) por dimensión, debe ser > 0
+    pub peso: f64,           // peso relativo en la mezcla (no hace falta que sumen 1)
+}
+
+#[allow(dead_code)] //// AAAAAAA debería no usar esto, pero quiero tener todas las 
+                    /// funciones disponibles
+impl ComponenteT {
+    /// Control total: media y escala distintas por dimensión.
+    pub fn nueva(df: f64, medias: [f64; DIM], escalas: [f64; DIM], peso: f64) -> Self {
+        Self { df, medias, escalas, peso }
+    }
+
+    /// Atajo para el caso común: la misma media y escala en las 22 dimensiones.
+    pub fn simetrica(df: f64, media: f64, escala: f64, peso: f64) -> Self {
+        Self { df, medias: [media; DIM], escalas: [escala; DIM], peso }
+    }
+
+    /// t-Student estándar (media 0, escala 1, peso 1).
+    pub fn estandar(df: f64) -> Self {
+        Self::simetrica(df, 0.0, 1.0, 1.0)
+    }
+
+    /// Componente con parámetros aleatorios, muestreados con `rng`
+    /// dentro de los rangos por defecto del módulo.
+    fn aleatoria(rng: &mut StdRng) -> Self {
+        let dist_df = Uniform::new(DF_MIN, DF_MAX);
+        let dist_media = Uniform::new(MEDIA_MIN, MEDIA_MAX);
+        let dist_escala = Uniform::new(ESCALA_MIN, ESCALA_MAX);
+        let dist_peso = Uniform::new(PESO_MIN, PESO_MAX);
+
+        let df = rng.sample(dist_df);
+        let peso = rng.sample(dist_peso);
+        let mut medias = [0.0; DIM];
+        let mut escalas = [0.0; DIM];
+        for i in 0..DIM {
+            medias[i] = rng.sample(dist_media);
+            escalas[i] = rng.sample(dist_escala);
+        }
+        Self::nueva(df, medias, escalas, peso)
+    }
 }
 
 /// Generador de vectores de `DIM` dimensiones a partir de una mezcla de
-/// distribuciones t de Student ("empalmadas"). Cada llamada a
-/// `generar_vector()` produce una muestra independiente.
-struct GeneradorMezclaT {
+/// distribuciones t de Student. Implementa `Iterator`, así que puedes
+/// tratarlo como una fuente infinita de vectores aleatorios.
+pub struct GeneradorMezclaT {
     componentes: Vec<ComponenteT>,
-    pesos_acumulados: Vec<f64>, // CDF discreta para elegir componente
-    rng: Rng,
+    pesos_acumulados: Vec<f64>,
+    rng: StdRng,
 }
 
+#[allow(dead_code)] /// Igual no quiero pero es mejor asi
 impl GeneradorMezclaT {
-    fn new(componentes: Vec<ComponenteT>, seed: u64) -> Self {
+    /// Construye el generador a partir de componentes ya definidos.
+    /// La semilla interna sale de la entropía del sistema (no reproducible).
+    pub fn new(componentes: Vec<ComponenteT>) -> Self {
+        Self::construir(componentes, StdRng::from_entropy())
+    }
+
+    /// Igual que `new`, pero con una semilla explícita: dos generadores
+    /// creados con los mismos componentes y la misma semilla producen
+    /// exactamente la misma secuencia de vectores.
+    pub fn new_con_semilla(componentes: Vec<ComponenteT>, semilla: u64) -> Self {
+        Self::construir(componentes, StdRng::seed_from_u64(semilla))
+    }
+
+    /// Crea el generador con `n` distribuciones t "empalmadas", cada una
+    /// con parámetros (df, medias, escalas, peso) elegidos al azar. Toda
+    /// la aleatoriedad —tanto la de los parámetros como la de los
+    /// vectores que genere después— sale de una sola semilla, así que
+    /// el resultado es 100% reproducible: misma `n` + misma `semilla`
+    /// => mismas distribuciones y mismos vectores generados después.
+    pub fn aleatorio(n: usize, semilla: u64) -> Self {
+        assert!(n > 0, "n debe ser al menos 1");
+        let mut rng = StdRng::seed_from_u64(semilla);
+        let componentes: Vec<ComponenteT> = (0..n).map(|_| ComponenteT::aleatoria(&mut rng)).collect();
+        Self::construir(componentes, rng)
+    }
+
+    fn construir(componentes: Vec<ComponenteT>, rng: StdRng) -> Self {
         assert!(!componentes.is_empty(), "Debe haber al menos una distribución");
         let total: f64 = componentes.iter().map(|c| c.peso).sum();
         assert!(total > 0.0, "La suma de los pesos debe ser positiva");
@@ -140,37 +132,49 @@ impl GeneradorMezclaT {
             })
             .collect();
 
-        GeneradorMezclaT {
-            componentes,
-            pesos_acumulados,
-            rng: Rng::new(seed),
-        }
+        Self { componentes, pesos_acumulados, rng }
     }
 
-    /// Elige el índice de componente según los pesos de la mezcla.
+    /// Muestra de solo lectura de los componentes actuales (útil para
+    /// saber qué distribuciones quedaron al usar `aleatorio`).
+    pub fn componentes(&self) -> &[ComponenteT] {
+        &self.componentes
+    }
+
     fn elegir_componente(&mut self) -> usize {
-        let u = self.rng.next_f64();
-        match self
-            .pesos_acumulados
+        let u: f64 = self.rng.r#gen();
+        self.pesos_acumulados
             .iter()
             .position(|&p| u <= p)
-        {
-            Some(i) => i,
-            None => self.componentes.len() - 1,
-        }
+            .unwrap_or(self.componentes.len() - 1)
     }
 
-    /// Genera un nuevo vector de `DIM` dimensiones. Primero elige al azar
-    /// una de las distribuciones empalmadas (según su peso) y luego
-    /// muestrea las `DIM` componentes t de Student de esa distribución.
-    fn generar_vector(&mut self) -> [f64; DIM] {
+    /// Genera UN vector nuevo. Cada llamada es independiente: elige al
+    /// azar una de las distribuciones empalmadas (según su peso) y
+    /// muestrea las `DIM` componentes t de esa distribución.
+    pub fn generar_vector(&mut self) -> [f64; DIM] {
         let idx = self.elegir_componente();
         let comp = self.componentes[idx].clone();
+        let dist = StudentT::new(comp.df).expect("df debe ser > 0");
+
         let mut v = [0.0f64; DIM];
         for i in 0..DIM {
-            let t = self.rng.next_student_t(comp.df);
-            v[i] = comp.medias[i] + comp.escalas[i] * t;
+            v[i] = comp.medias[i] + comp.escalas[i] * dist.sample(&mut self.rng);
         }
         v
+    }
+
+    /// Atajo para generar `n` vectores de una vez.
+    pub fn generar_vectores(&mut self, n: usize) -> Vec<[f64; DIM]> {
+        (0..n).map(|_| self.generar_vector()).collect()
+    }
+}
+
+/// Permite usar el generador como un iterador infinito:
+/// `generador.by_ref().take(10).collect::<Vec<_>>()`
+impl Iterator for GeneradorMezclaT {
+    type Item = [f64; DIM];
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.generar_vector())
     }
 }

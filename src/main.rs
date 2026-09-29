@@ -18,11 +18,22 @@ mod modelo;
 //Normalizacion con referencia fija
 mod normaliza;
 use normaliza::{Normalizador, NormalizadorDeEntrada};
+//Simulador de espigas
+mod spikesim;
+use spikesim::{GeneradorMezclaT};
+
+//Para generar la semilla aleatoria
+use rand::Rng;
 
 //Tamaño de entrenamiento y lotes, ahora puestos por el usuario desde la línea
 //de órdenes (ver `Opciones`), con estos valores por defecto.
 const TRAIN_SIZE: usize = 400;
 const BATCH_SIZE: usize = 200;
+const NVEC_SIM:   usize = 20000;
+
+const INCOMPLETE_BUFF: bool = false; // Permite que se analizen buffers incompletos
+                                    // Esto es indeseado dado que el rendimiento
+                                    // de UMAP respecto a encajes pequeños es peor
 
 //Backend de la red neuronal, ncesito ver si esto puede ser optimizable
 type MyBackend = burn::backend::wgpu::CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -35,27 +46,37 @@ struct Opciones {
     batch_size: usize, // Lote de trabajo
     modelo: Option<String>, // Pesos y datos del modelo a usar
     cargar: bool,
+    sim: usize,
+    nsim: usize,
+    sim_seed: u64,
 }
 
 const USO: &str = "\
 uso: umap-mcqueen <Waveforms.csv> [opciones]
 
-  --modelo <ruta>   guarda el modelo entrenado en <ruta>.bin y <ruta>.json
-  --cargar          carga el modelo de --modelo en vez de entrenar
-  --train <n>       formas de onda de entrenamiento (por defecto 400)
-  --lote <n>        tamaño de lote (por defecto 200)
+  --modelo <ruta>           guarda el modelo entrenado en <ruta>.bin y <ruta>.json
+  --cargar                  carga el modelo de --modelo en vez de entrenar
+  --train <n>               formas de onda de entrenamiento (por defecto 400)
+  --lote <n>                tamaño de lote (por defecto 200)
+  --simular <n>             simular con n clusters
+  --vectores-sim <n>        vectores simulados por --simular
+  --semilla-sim <n>         semilla para simulación (por defecto aleatoria)
 ";
 
 //Argumentos de ejecución, regresa una variable tipo opciones y comprueba que
 //dadas opciones sean válidas.
 fn opciones() -> Result<Opciones, Box<dyn Error>> {
     let mut args = std::env::args().skip(1); //Iterador sobre los argumentos dados
+    let mut rng = rand::thread_rng();
     let mut o = Opciones {
         csv: String::new(),
         train_size: TRAIN_SIZE,
         batch_size: BATCH_SIZE,
         modelo: None,
         cargar: false,
+        sim : 0,
+        nsim : NVEC_SIM,
+        sim_seed : rng.gen_range(33333..=9999999),
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -63,6 +84,9 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--cargar" => o.cargar = true,
             "--train" => o.train_size = args.next().ok_or("--train necesita un número")?.parse()?,
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
+            "--simular" => o.sim = args.next().ok_or("--simular necesita un número natural")?.parse()?,
+            "--vectores-sim" => o.nsim = args.next().ok_or("--vectores-simulados necesita un número natural")?.parse()?,
+            "--semilla-sim" => o.nsim = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -71,8 +95,8 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             ruta => o.csv = ruta.to_string(),
         }
     }
-    if o.csv.is_empty() {
-        return Err(format!("falta el fichero de formas de onda\n\n{USO}").into());
+    if o.csv.is_empty() && o.sim == 0 {
+        return Err(format!("Requiere un archivo de ondas o argmentos para simulación\n\n{USO}").into());
     }
     if o.cargar && o.modelo.is_none() {
         return Err("--cargar necesita --modelo".into());
@@ -130,7 +154,6 @@ fn main_err() -> Result<(), Box<dyn Error>> {
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
-
     // Única vez en la que se va a usar la función que pasa la configuración,
     // por este motivo sugiero quitar esta complejidad extra, DenStream es
     // un ejemplo de por qué esta configuración es una variable mutable.
@@ -142,27 +165,59 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         .with_lambda(0.01)
         .with_mu(1.0);
 
-    //Lector de CSV
-    let mut lector = lector(&opts.csv)?;
-    let mut records = lector.records().enumerate();
+    let mut lectr: Option<csv::Reader<File>>;
+    let mut records: Box<dyn Iterator<Item = (usize, Result<csv::StringRecord, csv::Error>)>> = Box::new(std::iter::empty());
 
-    //Datos para entrenamiento
-    for (i, result) in &mut records {
-        let registro = result?; // Toma los datos del csv y los pasa a un string
-        buffer_crudo.push(fila_de(&registro)?); // Añadimos el nuevo vector al buffer
+    //Generador para simulación
+    let mut generador = if opts.sim == 0 {
+        GeneradorMezclaT::aleatorio(2, opts.sim_seed)
+    } else {
+        GeneradorMezclaT::aleatorio(opts.sim, opts.sim_seed)
+    };
+    let vector_generado = generador.generar_vector();
 
-        if buffer_crudo.len() == opts.train_size {
-            println!("Entrenamiento en proceso con {} vectores", i);
-            break; // Así, buffer es primer lote de vectores de entrenamiento.
+    // Si hay un csv que leer
+    if !opts.csv.is_empty() {
+        println!("Abriendo CSV: {}", &opts.csv);
+        //Lector de CSV
+        lectr = Some(lector(&opts.csv)?);
+        records = Box::new(lectr
+            .as_mut()
+            .expect("Error de archivo csv")
+            .records()
+            .enumerate());
+            //lectr.records().enumerate();
+        //Datos para entrenamiento
+        for (i, result) in &mut records {
+            let registro = result?; // Toma los datos del csv y los pasa a un string
+            buffer_crudo.push(fila_de(&registro)?); // Añadimos el nuevo vector al buffer
+
+            if buffer_crudo.len() == opts.train_size {
+                println!("Entrenamiento en proceso con {} vectores", i);
+                break; // Así, buffer es primer lote de vectores de entrenamiento.
+            }
+        }
+        if buffer_crudo.len() < opts.train_size {
+            return Err(format!(
+                "{} sólo tiene {} formas de onda y se pidieron {} de entrenamiento",
+                opts.csv, buffer_crudo.len(), opts.train_size
+            )
+            .into());
         }
     }
-    if buffer_crudo.len() < opts.train_size {
-        return Err(format!(
-            "{} sólo tiene {} formas de onda y se pidieron {} de entrenamiento",
-            opts.csv, buffer_crudo.len(), opts.train_size
-        )
-        .into());
+    else if opts.sim != 0 {
+        if opts.nsim <= opts.train_size {
+            return Err(format!(
+                    "El número de vectores a analizar: {} es inferior al lote de entrenamiento: {}",
+                    opts.nsim, opts.train_size
+                    )
+                .into());
+        }
+        for _ in 0..=opts.train_size {
+            buffer_crudo.push(vector_generado.to_vec());
+        }
     }
+
     let n_dim = buffer_crudo[0].len();
 
     //Crea el encaje primario y parámetros de normalización en base a dos casos:
@@ -228,7 +283,6 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     buffer_crudo.clear();
 
     let mut total_puntos: Vec<(f32, f32)> = Vec::new();
-
     //Procesa un lote: encaje, normalización, DenStream y gráfica.
     let procesa_lote = |lote: &[Vec<f64>], i: usize, ds: &mut DenStream, total: &mut Vec<(f32, f32)>| {
         //`fast-umap` NO normaliza en `transform`, aunque sí lo hace al entrenar.
@@ -272,6 +326,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             .display();
     };
 
+    println!("Lotes:");
+
     let mut ultimo = 0usize;
     for (i, result) in records { // seguimos con el archivo
         let registro = result?;
@@ -284,11 +340,9 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    //El último lote incompleto se descartaba en silencio: hasta `batch_size - 1`
-    //formas de onda del final del fichero no se procesaban nunca.
-    if !buffer_crudo.is_empty() {
+    // Procesa el último buffer, aunque tenga pocos vectores (poco recomendado)
+    if !buffer_crudo.is_empty() && INCOMPLETE_BUFF {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
-        if 
         procesa_lote(&buffer_crudo, ultimo, &mut ds, &mut total_puntos);
     }
 
