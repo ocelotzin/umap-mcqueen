@@ -117,9 +117,6 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
         .collect::<Result<Vec<f64>, _>>()?)
 }
 
-/// La configuración de UMAP, en un sitio, para que entrenar y cargar usen la misma.
-// No entiendo esta función, simplemente podríamos crear una variable con esto
-// esta es una función constante.
 fn configuracion() -> UmapConfig {
     UmapConfig {
         n_components: 2,
@@ -154,9 +151,6 @@ fn main_err() -> Result<(), Box<dyn Error>> {
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
-    // Única vez en la que se va a usar la función que pasa la configuración,
-    // por este motivo sugiero quitar esta complejidad extra, DenStream es
-    // un ejemplo de por qué esta configuración es una variable mutable.
     let config = configuracion();
 
     //Configuración DenStream
@@ -237,10 +231,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             manifiesto.n_entrenamiento,
             &manifiesto.huella_datos[..12]
         );
-        // Esto suena mucho a ia, y es comportamiento esperado en la documentación
         println!(
-            "⚠ El encaje de entrenamiento NO se guarda: `embedding()` de un modelo \
-             cargado está vacío por construcción, no por error."
+            "Nota: el encaje de entrenamiento no se guarda."
         );
         let norm_entrada = manifiesto.normalizacion_de_entrada.clone().ok_or(
             "el manifiesto no trae referencia de normalización de ENTRADA. Sin ella, \
