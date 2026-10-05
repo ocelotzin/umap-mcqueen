@@ -86,7 +86,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
             "--simular" => o.sim = args.next().ok_or("--simular necesita un número natural")?.parse()?,
             "--vectores-sim" => o.nsim = args.next().ok_or("--vectores-simulados necesita un número natural")?.parse()?,
-            "--semilla-sim" => o.nsim = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
+            "--semilla-sim" => o.sim_seed = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -174,7 +174,6 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     } else {
         GeneradorMezclaT::aleatorio(opts.sim, opts.sim_seed)
     };
-    let vector_generado = generador.generar_vector();
 
     // Si hay un csv que leer
     if !opts.csv.is_empty() {
@@ -206,6 +205,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         }
     }
     else if opts.sim != 0 {
+        println!("Vamos a simular {} clusters para {} vectores con la semilla: {}", opts.sim, opts.nsim, opts.sim_seed);
         if opts.nsim <= opts.train_size {
             return Err(format!(
                     "El número de vectores a analizar: {} es inferior al lote de entrenamiento: {}",
@@ -214,11 +214,14 @@ fn main_err() -> Result<(), Box<dyn Error>> {
                 .into());
         }
         for _ in 0..=opts.train_size {
+            let vector_generado = generador.generar_vector();
             buffer_crudo.push(vector_generado.to_vec());
         }
     }
 
     let n_dim = buffer_crudo[0].len();
+
+    println!("Lote de entrenamiento con {} vectores de dimensión {}", buffer_crudo.len(), n_dim);
 
     //Crea el encaje primario y parámetros de normalización en base a dos casos:
     let (fitted, normalizador, normalizador_de_entrada) = if opts.cargar {
@@ -329,7 +332,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     println!("Lotes:");
 
     let mut ultimo = 0usize;
-    for (i, result) in records { // seguimos con el archivo
+    for (i, result) in records { // si hay archivo, seguimos
         let registro = result?;
         buffer_crudo.push(fila_de(&registro)?);
         ultimo = i;
@@ -337,6 +340,18 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         if buffer_crudo.len() == opts.batch_size {
             procesa_lote(&buffer_crudo, i, &mut ds, &mut total_puntos);
             buffer_crudo.clear();
+        }
+    }
+
+    if opts.sim != 0 {
+        for i in 1..=opts.nsim {
+            let vector_generado = generador.generar_vector();
+            buffer_crudo.push(vector_generado.to_vec());
+
+            if buffer_crudo.len() == opts.batch_size {
+                procesa_lote(&buffer_crudo, i, &mut ds, &mut total_puntos);
+                buffer_crudo.clear();
+            }
         }
     }
 
