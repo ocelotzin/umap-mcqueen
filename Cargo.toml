@@ -16,3 +16,12 @@ sha2       = "0.10"
 rand       = "0.8"
 rand_distr = "0.4"
 
+# fast-umap 1.6.0 no deja fijar la semilla de sus generadores (solo siembra el
+# backend), así que dos entrenamientos iguales dan modelos distintos. Hasta que
+# upstream publique una versión con `UmapConfig::seed`, se compila el fork de
+# josemal98 (su rama `seed-config`, propuesta a upstream como PR). CUÁNDO SE
+# RETIRA: el día que crates.io traiga fast-umap con semilla configurable, se borra
+# este bloque, se sube la versión de arriba y se archiva el fork. Ver README.
+[patch.crates-io]
+fast-umap = { git = "https://github.com/josemal98/fast-umap", rev = "15dc6c5251cb7aecec4fe59d23ede30f0ac37e2b" }
+
