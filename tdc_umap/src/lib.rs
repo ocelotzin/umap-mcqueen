@@ -1,28 +1,23 @@
-//! `tdc_umap`: el clasificador de umap-mcqueen, importable desde Python para el
-//! motor `engine='umap'` del Peeler de tridesclous.
+//! `tdc_umap._core`: el clasificador de umap-mcqueen, importable desde Python
+//! para el motor `engine='umap'` del Peeler de tridesclous.
 //!
-//! ## Cómo se usa umap-mcqueen sin modificarlo
+//! ## Cómo se usa el núcleo de umap-mcqueen
 //!
-//! umap-mcqueen es un binario (sólo `main.rs`), así que no se puede depender de
-//! él como biblioteca. En vez de copiar su código, se compilan **sus mismos
-//! archivos** desde el submódulo con `#[path]`:
-//!
-//! * `normaliza.rs` — las referencias fijas de normalización (entrada y encaje).
-//! * `modelo.rs` — `carga_verificada`, que compara el manifiesto con la red.
-//!
-//! `modelo.rs` usa `crate::normaliza`, y aquí `normaliza` también está en la
-//! raíz del crate, así que compila sin tocar una línea.
+//! Este crate es miembro del workspace de umap-mcqueen y depende de su núcleo
+//! como biblioteca (`umap_mcqueen`): `normaliza` —las referencias fijas de
+//! normalización de entrada y encaje— y `modelo` —`carga_verificada`, que
+//! compara el manifiesto con la red— son **los mismos módulos** que usa la CLI,
+//! reexportados aquí. Un solo `Cargo.lock` fija las mismas versiones de
+//! `fast-umap`, `burn`, `cubecl` y `clump` para los dos: los pesos que guarda la
+//! CLI se cargan aquí con el mismo formato.
 //!
 //! La configuración de UMAP **no se duplica**: se reconstruye del manifiesto que
 //! escribió umap-mcqueen al entrenar. Sólo `hidden_sizes`, `n_components` y
 //! `input_size` definen la arquitectura (`FittedUmap::load`), y los tres están
 //! en el manifiesto. Así es imposible que este crate y `main.rs` discrepen.
 
-#[path = "../umap-mcqueen/src/normaliza.rs"]
-pub mod normaliza;
-
-#[path = "../umap-mcqueen/src/modelo.rs"]
-pub mod modelo;
+pub use umap_mcqueen::modelo;
+pub use umap_mcqueen::normaliza;
 
 pub mod identidades;
 pub mod motor;
@@ -164,8 +159,10 @@ impl PyClasificador {
     }
 }
 
+/// El módulo compilado se llama `tdc_umap._core`; el paquete de Python
+/// `tdc_umap` (en `python/`) reexporta `Clasificador` y añade `registrar()`.
 #[pymodule]
-fn tdc_umap(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyClasificador>()?;
     Ok(())
 }

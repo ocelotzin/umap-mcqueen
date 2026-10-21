@@ -6,7 +6,7 @@ donde están las espigas, que recorta EXACTAMENTE las mismas formas de onda que
 el exportador de entrenamiento, que los modos síncrono y asíncrono coinciden y
 que la ruta en línea (preprocesado en flujo) da lo mismo que la fuera de línea.
 
-    pytest tests/test_peeler_engine_umap.py -v
+    pytest python/tdc_umap/tests -v
 """
 
 import json
@@ -17,26 +17,12 @@ import tempfile
 import numpy as np
 import pytest
 
-import tridesclous
-
-if getattr(tridesclous, '__file__', None) is None:
-    # `tridesclous` resolvió a una carpeta sin __init__.py (paquete de espacio
-    # de nombres), no al paquete instalado. En este fork pasa con la carpeta
-    # `tridesclous/` de la raíz cuando el paquete no está instalado en el
-    # intérprete que corre pytest, o cuando se instaló con `pip install -e .`
-    # (el `package_dir={'tridesclous': '.'}` de setup.py no funciona en modo
-    # editable).
-    pytest.exit(
-        "`import tridesclous` encontró " + str(list(tridesclous.__path__)) + ", no el paquete.\n"
-        "Instala el fork (no editable) en el entorno con el que corres pytest:\n"
-        "    pip install .\n"
-        "y repite `pip install .` tras cada cambio.", returncode=4)
-
+import tdc_umap
 from tridesclous.dataio import DataIO
 from tridesclous.catalogueconstructor import CatalogueConstructor
 from tridesclous.peeler import Peeler
-from tridesclous.umap_tools import (aplana_formas, catalogo_sin_plantillas,
-                                    exporta_formas_para_umap, ruta_descripcion)
+from tdc_umap.umap_tools import (aplana_formas, catalogo_sin_plantillas,
+                                 exporta_formas_para_umap, ruta_descripcion)
 
 FS = 30000.
 NCH = 4
@@ -75,6 +61,12 @@ def _senal_sintetica(semilla=0):
             verdad.append((ti, u))
     verdad = np.array(sorted(verdad))
     return x, verdad
+
+
+@pytest.fixture(scope='module', autouse=True)
+def motor_registrado():
+    """El alta es explícita: sin esto, `engine='umap'` no existe para tridesclous."""
+    tdc_umap.registrar()
 
 
 @pytest.fixture(scope='module')
@@ -135,7 +127,11 @@ def _peeler_online(e, **umap):
 
 def test_registrado():
     from tridesclous.peeler import peeler_engines
-    assert 'umap' in peeler_engines
+    from tdc_umap.peeler_engine_umap import PeelerEngineUmap
+    assert peeler_engines['umap'] is PeelerEngineUmap
+    # Registrar otra vez no cambia nada: la misma clase, sin duplicados.
+    assert tdc_umap.registrar() is PeelerEngineUmap
+    assert peeler_engines['umap'] is PeelerEngineUmap
 
 
 def test_exportacion(entorno):

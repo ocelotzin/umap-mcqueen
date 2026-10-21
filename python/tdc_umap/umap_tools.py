@@ -186,8 +186,8 @@ def _main():
     ap.add_argument('--nombre-catalogo', default='umap')
     a = ap.parse_args()
 
-    from .dataio import DataIO
-    from .catalogueconstructor import CatalogueConstructor
+    from tridesclous.dataio import DataIO
+    from tridesclous.catalogueconstructor import CatalogueConstructor
     cc = CatalogueConstructor(dataio=DataIO(a.dirname), chan_grp=a.chan_grp)
     ruta, n, n_dim = exporta_formas_para_umap(cc, a.base, n_max=a.n_max, semilla=a.semilla)
     cc.dataio.save_catalogue(catalogo_sin_plantillas(cc), name=a.nombre_catalogo)

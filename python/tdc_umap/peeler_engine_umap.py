@@ -49,9 +49,10 @@ from collections import deque
 
 import numpy as np
 
-from .peakdetector import get_peak_detector_class
-from .peeler_tools import LABEL_ALIEN, _dtype_spike
-from .signalpreprocessor import signalpreprocessor_engines
+from tridesclous.peakdetector import get_peak_detector_class
+from tridesclous.peeler_tools import LABEL_ALIEN, _dtype_spike
+from tridesclous.signalpreprocessor import signalpreprocessor_engines
+
 from .umap_tools import aplana_formas, carga_descripcion, ruta_descripcion
 
 # Con ``umap_campo_canal=True`` cada espiga lleva también el canal (índice
@@ -73,16 +74,16 @@ class _Vaciar:
 
 
 def importa_motor_rust():
-    """El módulo compilado de ``umap_rust/``. Error claro si no está instalado."""
+    """El módulo compilado (``tdc_umap._core``). Error claro si no está."""
     try:
-        import tdc_umap
+        from . import _core
     except ImportError as exc:
         raise ImportError(
-            "engine='umap' necesita el módulo compilado `tdc_umap`. Desde el fork:\n"
-            "    git submodule update --init umap_rust/umap-mcqueen\n"
-            "    cd umap_rust && pip install maturin && maturin develop --release\n"
+            "engine='umap' necesita el módulo compilado `tdc_umap._core`. Desde un clon de "
+            "umap-mcqueen, con el entorno activo:\n"
+            "    pip install maturin && pip install -e .\n"
             f"(error original: {exc})") from exc
-    return tdc_umap
+    return _core
 
 
 class _Trabajador:

@@ -1,2 +1,9 @@
 /target
 data/Waveforms.csv
+
+# lo que dejan maturin, pip y pytest
+__pycache__/
+*.so
+.pytest_cache/
+.venv/
+*.egg-info/
