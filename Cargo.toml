@@ -3,15 +3,30 @@ name    = "umap-mcqueen"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+# El workspace: este paquete (el núcleo como biblioteca `umap_mcqueen`, y la CLI)
+# y `tdc_umap/`, el puente a tridesclous (módulo de Python). Un solo Cargo.lock,
+# y las versiones que tocan el formato de los pesos declaradas una sola vez,
+# abajo, para que los dos crates las compartan por construcción.
+[workspace]
+members = ["tdc_umap"]
+
+[workspace.dependencies]
 fast-umap  = "1.6.0"
 burn       = { version = "0.20.1", features = ["wgpu", "autodiff", "autotune"] }
 cubecl     = { version = "0.9.0",  features = ["wgpu"] }
-csv        = "1.1"
-textplots  = "0.8"
 clump      = "0.5.8"
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dependencies]
+fast-umap  = { workspace = true }
+burn       = { workspace = true }
+cubecl     = { workspace = true }
+clump      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+csv        = "1.1"
+textplots  = "0.8"
 sha2       = "0.10"
 rand       = "0.8"
 rand_distr = "0.4"

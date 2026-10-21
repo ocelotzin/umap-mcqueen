@@ -13,14 +13,13 @@ use textplots::{Chart, Plot, Shape};
 //Para clustering
 use clump::DenStream;
 
-//Guardado y carga verificada del modelo
-mod modelo;
-//Normalizacion con referencia fija
-mod normaliza;
-use normaliza::{Normalizador, NormalizadorDeEntrada};
-//Simulador de espigas
-mod spikesim;
-use spikesim::{GeneradorMezclaT};
+//El núcleo es la biblioteca `umap_mcqueen` (src/lib.rs): el guardado y la carga
+//verificada del modelo, la normalización con referencia fija, el simulador de
+//espigas y la configuración de UMAP. Esta CLI la usa, y `tdc_umap` también.
+use umap_mcqueen::configuracion;
+use umap_mcqueen::modelo;
+use umap_mcqueen::normaliza::{Normalizador, NormalizadorDeEntrada};
+use umap_mcqueen::spikesim::GeneradorMezclaT;
 
 //Para generar la semilla aleatoria
 use rand::Rng;
@@ -123,30 +122,6 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
         .collect::<Result<Vec<f64>, _>>()?)
 }
 
-//La semilla entra aquí porque es parte de la configuración del entrenamiento
-//(`UmapConfig::seed`): siembra la inicialización de la red y el muestreo de
-//aristas de cada época. Misma configuración, mismos datos y misma semilla dan
-//los mismos pesos; el manifiesto la guarda para que se sepa cuál fue.
-fn configuracion(semilla: u64) -> UmapConfig {
-    UmapConfig {
-        n_components: 2,
-        hidden_sizes: vec![128],
-        seed: semilla,
-        graph: GraphParams {
-            n_neighbors: 15,
-            metric: Metric::Euclidean,
-            ..Default::default()
-        },
-        optimization: OptimizationParams {
-            n_epochs: 200,
-            learning_rate: 1e-3,
-            patience: Some(50),
-            verbose: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
 
 // Procesa los errores en el loop principal para facilitar su lectura
 // revisar si esta práctica es común y eficiente

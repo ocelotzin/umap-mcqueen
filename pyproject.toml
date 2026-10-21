@@ -1,0 +1,33 @@
+# El paquete de Python `tdc_umap`: el módulo compilado `tdc_umap._core` (Rust,
+# en tdc_umap/) más el paquete puro de python/tdc_umap/ (el motor engine='umap'
+# para el Peeler de tridesclous y sus herramientas). Lo construye maturin.
+#
+#     python -m venv .venv && . .venv/bin/activate
+#     pip install maturin && pip install -e .      # trae tridesclous y compila tdc_umap
+#     pytest python/tdc_umap/tests
+#
+# En el entorno del pipeline, que ya tiene tridesclous por su submódulo (el mismo
+# commit), se instala con `pip install --no-deps -e .` para no reinstalarlo.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tdc-umap"
+version = "0.1.0"
+description = "El motor engine='umap' (umap-mcqueen) para el Peeler de tridesclous"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    # El tridesclous del pipeline: josemal98/tridesclous-edited, rama upstream-mas-mmap, commit 5e3fac8.
+    "tridesclous @ git+https://github.com/josemal98/tridesclous-edited.git@5e3fac85f37302402e457b330af7610217e99810",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.maturin]
+manifest-path = "tdc_umap/Cargo.toml"
+python-source = "python"
+module-name = "tdc_umap._core"
+features = ["pyo3/extension-module"]
