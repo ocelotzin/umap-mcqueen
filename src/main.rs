@@ -49,6 +49,7 @@ struct Opciones {
     sim: usize,
     nsim: usize,
     sim_seed: u64,
+    semilla: u64, // Semilla de todos los generadores del entrenamiento
 }
 
 const USO: &str = "\
@@ -58,6 +59,9 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --cargar                  carga el modelo de --modelo en vez de entrenar
   --train <n>               formas de onda de entrenamiento (por defecto 400)
   --lote <n>                tamaño de lote (por defecto 200)
+  --semilla <n>             semilla del entrenamiento: con los mismos datos y la misma
+                            semilla salen los mismos pesos (por defecto 9999). Se guarda
+                            en el manifiesto del modelo
   --simular <n>             simular con n clusters
   --vectores-sim <n>        vectores simulados por --simular
   --semilla-sim <n>         semilla para simulación (por defecto aleatoria)
@@ -77,6 +81,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         sim : 0,
         nsim : NVEC_SIM,
         sim_seed : rng.gen_range(33333..=9999999),
+        semilla: DEFAULT_SEED,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -84,6 +89,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--cargar" => o.cargar = true,
             "--train" => o.train_size = args.next().ok_or("--train necesita un número")?.parse()?,
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
+            "--semilla" => o.semilla = args.next().ok_or("--semilla necesita un número natural")?.parse()?,
             "--simular" => o.sim = args.next().ok_or("--simular necesita un número natural")?.parse()?,
             "--vectores-sim" => o.nsim = args.next().ok_or("--vectores-simulados necesita un número natural")?.parse()?,
             "--semilla-sim" => o.sim_seed = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
@@ -117,10 +123,15 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
         .collect::<Result<Vec<f64>, _>>()?)
 }
 
-fn configuracion() -> UmapConfig {
+//La semilla entra aquí porque es parte de la configuración del entrenamiento
+//(`UmapConfig::seed`): siembra la inicialización de la red y el muestreo de
+//aristas de cada época. Misma configuración, mismos datos y misma semilla dan
+//los mismos pesos; el manifiesto la guarda para que se sepa cuál fue.
+fn configuracion(semilla: u64) -> UmapConfig {
     UmapConfig {
         n_components: 2,
         hidden_sizes: vec![128],
+        seed: semilla,
         graph: GraphParams {
             n_neighbors: 15,
             metric: Metric::Euclidean,
@@ -151,7 +162,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
-    let config = configuracion();
+    let config = configuracion(opts.semilla);
 
     //Configuración DenStream
     let mut ds = DenStream::new(0.1, 3)
@@ -227,9 +238,13 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             Default::default(),
         )?;
         println!(
-            "Modelo cargado de {base}.bin — entrenado con {} vectores, huella {}…",
+            "Modelo cargado de {base}.bin — entrenado con {} vectores, huella {}…, semilla {}",
             manifiesto.n_entrenamiento,
-            &manifiesto.huella_datos[..12]
+            &manifiesto.huella_datos[..12],
+            manifiesto
+                .semilla
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "desconocida (manifiesto de formato 3)".into())
         );
         println!(
             "Nota: el encaje de entrenamiento no se guarda."
@@ -247,6 +262,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         )?;
         (m, norm, norm_entrada)
     } else {
+        println!("Semilla del entrenamiento: {}", opts.semilla);
         //Reducimos el encaje primario y a la par entrenamos
         let m = fast_umap::Umap::<MyAutodiffBackend>::new(config.clone()).fit(buffer_crudo.clone(), None); // UMAPEAR
         //La red se entrena sobre datos normalizados por caracteristica; hay que

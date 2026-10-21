@@ -2263,8 +2263,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 [[package]]
 name = "fast-umap"
 version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a8e69887caf321df946c7d2d7c8ec6fe64bdaf50503ea61f57ab41a0d96bd8"
+source = "git+https://github.com/josemal98/fast-umap?rev=15dc6c5251cb7aecec4fe59d23ede30f0ac37e2b#15dc6c5251cb7aecec4fe59d23ede30f0ac37e2b"
 dependencies = [
  "burn",
  "burn-cubecl",

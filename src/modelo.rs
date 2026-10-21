@@ -64,6 +64,13 @@ pub struct Manifiesto {
     /// datos crudos (ver `normaliza::NormalizadorDeEntrada`). Hay que aplicarla a
     /// mano antes de `transform`, y tiene que ser la del entrenamiento.
     pub normalizacion_de_entrada: Option<NormalizadorDeEntrada>,
+    /// Semilla de todos los generadores del entrenamiento (`UmapConfig::seed`).
+    ///
+    /// Con los mismos datos, la misma configuración y la misma semilla salen los
+    /// mismos pesos; sin ella, un modelo no se puede reproducir, solo reentrenar.
+    /// `None` en los manifiestos de formato 3, anteriores a que se guardara.
+    #[serde(default)]
+    pub semilla: Option<u64>,
 }
 
 /// Qué no cuadra entre lo que se pide y lo que hay guardado.
@@ -116,7 +123,7 @@ impl Manifiesto {
         normalizacion_de_entrada: Option<NormalizadorDeEntrada>,
     ) -> Self {
         Self {
-            formato: 3,
+            formato: 4,
             n_components: config.n_components,
             hidden_sizes: config.hidden_sizes.clone(),
             n_neighbors: config.graph.n_neighbors,
@@ -130,6 +137,7 @@ impl Manifiesto {
                 .unwrap_or(0),
             normalizacion,
             normalizacion_de_entrada,
+            semilla: Some(config.seed),
         }
     }
 
@@ -245,4 +253,31 @@ pub fn carga_verificada<B: AutodiffBackend>(
 
     let modelo = FittedUmap::<B>::load(&rutas.base, config, input_size, device)?;
     Ok((modelo, manifiesto))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un manifiesto de formato 3 (sin `semilla`) se sigue leyendo, con la
+    /// semilla desconocida; uno nuevo lleva formato 4 y la semilla del
+    /// entrenamiento. Si esta prueba deja de pasar, los modelos guardados antes
+    /// de la semilla dejaron de cargarse, o la semilla dejó de guardarse.
+    #[test]
+    fn formato_3_sin_semilla_y_formato_4_con_ella() {
+        let viejo = r#"{"formato":3,"n_components":2,"hidden_sizes":[128],"n_neighbors":15,
+            "metrica":"Euclidean","input_size":22,"n_entrenamiento":10,"huella_datos":"x",
+            "guardado_en":0,"normalizacion":null,"normalizacion_de_entrada":null}"#;
+        let m: Manifiesto = serde_json::from_str(viejo).expect("el formato 3 tiene que seguir leyéndose");
+        assert_eq!(m.formato, 3);
+        assert_eq!(m.semilla, None);
+
+        let config = UmapConfig { seed: 7, ..Default::default() };
+        let datos = vec![vec![0.0, 1.0], vec![2.0, 3.0]];
+        let nuevo = Manifiesto::de(&config, &datos, None, None);
+        assert_eq!(nuevo.formato, 4);
+        assert_eq!(nuevo.semilla, Some(7));
+        let ida_y_vuelta: Manifiesto = serde_json::from_str(&serde_json::to_string(&nuevo).unwrap()).unwrap();
+        assert_eq!(ida_y_vuelta.semilla, Some(7));
+    }
 }
