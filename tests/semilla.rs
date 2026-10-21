@@ -37,26 +37,12 @@ fn nubes() -> Vec<Vec<f64>> {
         .collect()
 }
 
-/// La configuración de `main.rs::configuracion()`, con `verbose` apagado.
+/// La configuración real de la CLI (`umap_mcqueen::configuracion`), con
+/// `verbose` apagado para no llenar la salida de la prueba.
 fn configuracion(semilla: u64) -> UmapConfig {
-    UmapConfig {
-        n_components: 2,
-        hidden_sizes: vec![128],
-        seed: semilla,
-        graph: GraphParams {
-            n_neighbors: 15,
-            metric: Metric::Euclidean,
-            ..Default::default()
-        },
-        optimization: OptimizationParams {
-            n_epochs: 200,
-            learning_rate: 1e-3,
-            patience: Some(50),
-            verbose: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+    let mut c = umap_mcqueen::configuracion(semilla);
+    c.optimization.verbose = false;
+    c
 }
 
 fn encaje(semilla: u64) -> Vec<Vec<f64>> {
