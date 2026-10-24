@@ -7,6 +7,7 @@
 use fast_umap::prelude::*;
 
 /// Guardado y carga **verificada** del modelo: pesos más manifiesto.
+pub mod denstream;
 pub mod modelo;
 /// Normalización con referencia fija, de la entrada y del encaje.
 pub mod normaliza;

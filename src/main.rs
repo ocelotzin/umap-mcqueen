@@ -139,11 +139,9 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
     let config = configuracion(opts.semilla);
 
-    //Configuración DenStream
-    let mut ds = DenStream::new(0.1, 3)
-        .with_beta(0.5)
-        .with_lambda(0.01)
-        .with_mu(1.0);
+    //Configuración DenStream: la misma que usa tdc_umap (ver src/denstream.rs,
+    //y ojo: clump compara distancias AL CUADRADO).
+    let mut ds = umap_mcqueen::denstream::nuevo();
 
     let mut lectr: Option<csv::Reader<File>>;
     let mut records: Box<dyn Iterator<Item = (usize, Result<csv::StringRecord, csv::Error>)>> = Box::new(std::iter::empty());
@@ -295,8 +293,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         //Con referencia fija, salirse de [0,1] deja de ser imposible y pasa a ser
         //una señal: si crece, el modelo ya no representa lo que llega.
         println!(
-            "--- Lote en índice {}: {} micro clusters · {:.1}% fuera de [0,1] ---",
-            i, ds.n_clusters(), 100.0 * fuera
+            "--- Lote en índice {}: {} micro clusters → {} unidades · {:.1}% fuera de [0,1] ---",
+            i, ds.n_clusters(), umap_mcqueen::denstream::n_unidades(ds), 100.0 * fuera
         );
 
         let puntos: Vec<(f32, f32)> = embedding_normalizado // Para graficar el embedding,

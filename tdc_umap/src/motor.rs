@@ -32,7 +32,8 @@ pub struct ParamsDenStream {
     pub beta: f64,
     pub lambda: f64,
     pub mu: f64,
-    /// `None` deja el valor de `clump` (2 × epsilon).
+    /// Distancia² entre centroides para unirlos en una unidad. `None` deja el
+    /// valor de `clump` (2 × epsilon), que en el encaje [0,1] une casi todo.
     pub macro_epsilon: Option<f32>,
     /// `None` deja el valor de `clump` (100 actualizaciones).
     pub poda_cada: Option<usize>,
@@ -43,15 +44,16 @@ pub struct ParamsDenStream {
 }
 
 impl Default for ParamsDenStream {
-    /// Los valores que ya usabas en `main.rs`.
+    /// Los de la CLI, que viven en `umap_mcqueen::denstream`.
     fn default() -> Self {
+        use umap_mcqueen::denstream as d;
         Self {
-            epsilon: 0.1,
-            min_pts: 3,
-            beta: 0.5,
-            lambda: 0.01,
-            mu: 1.0,
-            macro_epsilon: None,
+            epsilon: d::EPSILON,
+            min_pts: d::MIN_PTS,
+            beta: d::BETA,
+            lambda: d::LAMBDA,
+            mu: d::MU,
+            macro_epsilon: Some(d::MACRO_EPSILON),
             poda_cada: None,
             micro_aislado_es_unidad: true,
         }
@@ -64,6 +66,15 @@ impl ParamsDenStream {
         let mut v = Vec::new();
         // Un micro-cluster nuevo nace con peso 1.0. Si beta·mu <= 1, nace ya como
         // «potencial» y la ruta de outliers no se usa nunca: no hay filtro de ruido.
+        let macro_eps = self.macro_epsilon.unwrap_or(2.0 * self.epsilon);
+        if macro_eps >= 0.1 {
+            v.push(format!(
+                "macro_epsilon = {macro_eps} es una distancia AL CUADRADO: DBSCAN une \
+                 centroides a {:.2} en el encaje [0,1], y tiende a juntar todas las \
+                 unidades en una. Prueba 0.04 (distancia 0.2).",
+                macro_eps.sqrt()
+            ));
+        }
         if self.beta * self.mu <= 1.0 {
             v.push(format!(
                 "beta·mu = {:.2} <= 1: cada punto nuevo nace como micro-cluster potencial, \

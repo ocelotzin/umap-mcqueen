@@ -85,8 +85,13 @@ impl PyClasificador {
     #[new]
     #[pyo3(signature = (
         base, n_dim,
-        epsilon=0.1, min_pts=3, beta=0.5, lambda_=0.01, mu=1.0,
-        macro_epsilon=None, poda_cada=None, micro_aislado_es_unidad=true,
+        epsilon=umap_mcqueen::denstream::EPSILON,
+        min_pts=umap_mcqueen::denstream::MIN_PTS,
+        beta=umap_mcqueen::denstream::BETA,
+        lambda_=umap_mcqueen::denstream::LAMBDA,
+        mu=umap_mcqueen::denstream::MU,
+        macro_epsilon=Some(umap_mcqueen::denstream::MACRO_EPSILON),
+        poda_cada=None, micro_aislado_es_unidad=true,
         tolerancia=0.15, olvido_lotes=200,
     ))]
     #[allow(clippy::too_many_arguments)]
