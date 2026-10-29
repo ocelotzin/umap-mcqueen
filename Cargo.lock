@@ -6259,11 +6259,13 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "clump",
+ "colored 2.2.0",
  "csv",
  "cubecl",
  "fast-umap",
  "rand 0.8.8",
  "rand_distr 0.4.3",
+ "rgb",
  "serde",
  "serde_json",
  "sha2",

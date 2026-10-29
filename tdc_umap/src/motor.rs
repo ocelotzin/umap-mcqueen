@@ -6,22 +6,18 @@
 //! mismos parámetros por defecto). Lo que añade es lo que el Peeler necesita y
 //! `main.rs` no hace: **una etiqueta estable por forma de onda**.
 
-use std::collections::HashMap;
 use std::error::Error;
 
 use clump::DenStream;
 use fast_umap::FittedUmap;
 
-use crate::identidades::Identidades;
+use umap_mcqueen::denstream::Etiquetador;
 use crate::modelo;
 use crate::normaliza::{Normalizador, NormalizadorDeEntrada};
 use crate::{configuracion_de, lee_manifiesto, MyAutodiffBackend};
 
-/// `clump` marca el ruido con `usize::MAX` (su constante `NOISE`).
-const RUIDO: usize = usize::MAX;
-/// Etiqueta que sale al stream para una forma de onda sin unidad. Coincide con
-/// `LABEL_TRASH` de tridesclous, así el resto del pipeline la trata igual.
-pub const ETIQUETA_RUIDO: i64 = -1;
+/// -1: igual que `LABEL_TRASH` de tridesclous.
+pub use umap_mcqueen::denstream::ETIQUETA_RUIDO;
 
 #[derive(Debug, Clone)]
 pub struct ParamsDenStream {
@@ -117,9 +113,7 @@ pub struct Motor {
     fitted: FittedUmap<MyAutodiffBackend>,
     norm: Normalizador,
     norm_entrada: NormalizadorDeEntrada,
-    ds: DenStream,
-    params: ParamsDenStream,
-    identidades: Identidades,
+    etiquetador: Etiquetador,
     pub n_dim: usize,
     /// Resumen legible del modelo cargado, para los registros.
     pub info: String,
@@ -159,13 +153,13 @@ impl Motor {
             manifiesto.n_entrenamiento,
             &manifiesto.huella_datos[..manifiesto.huella_datos.len().min(12)],
         );
+        let etiquetador = Etiquetador::con(
+            params.construye(), tolerancia, olvido_lotes, params.micro_aislado_es_unidad);
         Ok(Self {
+            etiquetador,
             fitted,
             norm,
             norm_entrada,
-            ds: params.construye(),
-            params,
-            identidades: Identidades::new(tolerancia, olvido_lotes),
             n_dim,
             info,
         })
@@ -190,87 +184,17 @@ impl Motor {
             .map(|fila| fila.iter().map(|&x| x as f32).collect())
             .collect();
 
-        // DenStream rechaza NaN/inf con error y tiraría el lote entero; esos
-        // puntos se apartan y salen como ruido.
-        let validos: Vec<usize> = (0..puntos.len())
-            .filter(|&i| puntos[i].iter().all(|x| x.is_finite()))
-            .collect();
-        let mut etiquetas = vec![ETIQUETA_RUIDO; puntos.len()];
-        if validos.is_empty() {
-            return Ok(Resultado { etiquetas, encaje: puntos, fuera_de_rango, ..Default::default() });
-        }
-        let puntos_validos: Vec<Vec<f32>> = validos.iter().map(|&i| puntos[i].clone()).collect();
-
-        // 1) Aprender. Los índices que devuelve `update_batch` NO sirven para
-        //    etiquetar: si la poda salta a mitad del lote, `retain` recorre el
-        //    `Vec` y los índices de los primeros puntos ya apuntan a otro sitio.
-        self.ds.update_batch(&puntos_validos).map_err(|e| e.to_string())?;
-
-        // 2) Etiquetar contra el estado FINAL, donde todos los índices son coherentes.
-        let micro: Vec<usize> = if self.ds.n_clusters() == 0 {
-            vec![RUIDO; puntos_validos.len()]
-        } else {
-            self.ds.predict_batch(&puntos_validos).map_err(|e| e.to_string())?
-        };
-
-        // 3) Micro → grupo. DBSCAN sobre centroides da los macro-clusters.
-        let macro_de_micro = self.ds.macro_cluster().unwrap_or_default();
-        let centroides = self.ds.centroids();
-        let cuentas = self.ds.counts();
-
-        // Clave de grupo: k >= 0 para un macro-cluster de DBSCAN; -(j+2) para un
-        // micro-cluster aislado que se promueve a unidad propia.
-        let aislado_es_unidad = self.params.micro_aislado_es_unidad;
-        let clave_de_micro = |j: usize| -> Option<i64> {
-            match macro_de_micro.get(j) {
-                Some(&k) if k != RUIDO => Some(k as i64),
-                Some(_) if aislado_es_unidad => Some(-(j as i64) - 2),
-                _ => None,
-            }
-        };
-
-        // Centroide de cada grupo, ponderado por el número de puntos de cada micro.
-        let mut sumas: HashMap<i64, (Vec<f64>, f64)> = HashMap::new();
-        for (j, c) in centroides.iter().enumerate() {
-            if let Some(clave) = clave_de_micro(j) {
-                let w = cuentas.get(j).copied().unwrap_or(1).max(1) as f64;
-                let e = sumas.entry(clave).or_insert_with(|| (vec![0.0; c.len()], 0.0));
-                for (s, &x) in e.0.iter_mut().zip(c) {
-                    *s += w * x as f64;
-                }
-                e.1 += w;
-            }
-        }
-        let mut claves: Vec<i64> = sumas.keys().copied().collect();
-        claves.sort_unstable(); // orden determinista; el id no depende de él
-        let centroides_grupo: Vec<Vec<f32>> = claves
-            .iter()
-            .map(|k| {
-                let (s, w) = &sumas[k];
-                s.iter().map(|x| (x / w) as f32).collect()
-            })
-            .collect();
-
-        // 4) Grupo → id estable entre lotes.
-        let ids = self.identidades.asigna(&centroides_grupo);
-        let id_de_clave: HashMap<i64, i64> = claves.into_iter().zip(ids).collect();
-
-        for (pos, &i) in validos.iter().enumerate() {
-            let m = micro[pos];
-            if m == RUIDO {
-                continue;
-            }
-            if let Some(id) = clave_de_micro(m).and_then(|k| id_de_clave.get(&k)) {
-                etiquetas[i] = *id;
-            }
-        }
+        // DenStream + agrupamiento + ids estables: lo mismo que la CLI
+        // (`umap_mcqueen::denstream::Etiquetador`). Los puntos con NaN/inf
+        // salen como ruido sin llegar a DenStream.
+        let etiquetas = self.etiquetador.etiqueta(&puntos)?;
 
         Ok(Resultado {
             etiquetas,
             encaje: puntos,
             fuera_de_rango,
-            n_micro: self.ds.n_clusters(),
-            n_unidades: self.identidades.n_unidades(),
+            n_micro: self.etiquetador.n_micro(),
+            n_unidades: self.etiquetador.n_unidades(),
         })
     }
 }

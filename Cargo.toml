@@ -27,6 +27,10 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 csv        = "1.1"
 textplots  = "0.8"
+# Colores de textplots (ya venía con él; se declara para nombrar RGB8).
+rgb        = "0.8"
+# El mismo colored que usa textplots (vía drawille), para colorear igual.
+colored    = "2.2"
 sha2       = "0.10"
 rand       = "0.8"
 rand_distr = "0.4"

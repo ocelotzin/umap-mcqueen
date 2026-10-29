@@ -1,5 +1,6 @@
 /target
-data/Waveforms.csv
+data/
+
 
 # lo que dejan maturin, pip y pytest
 __pycache__/

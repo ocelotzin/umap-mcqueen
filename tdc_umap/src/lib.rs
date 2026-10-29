@@ -19,7 +19,7 @@
 pub use umap_mcqueen::modelo;
 pub use umap_mcqueen::normaliza;
 
-pub mod identidades;
+pub use umap_mcqueen::identidades;
 pub mod motor;
 
 use std::sync::Mutex;
