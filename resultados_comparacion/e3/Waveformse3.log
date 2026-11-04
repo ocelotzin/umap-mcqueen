@@ -1,0 +1,38 @@
+Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
+[fast-umap] Configuration:
+[fast-umap]   samples=2000  features=48  k_neighbors=15
+[fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
+[fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
+[fast-umap] Computing global k-NN graph (k=15) …
+[fast-umap] k-NN done in 0.15s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] Training started …
+[fast-umap] Training complete — 200 epochs in 00:00:22, best loss: 0.319057
+29308 espigas de 48 muestras.
+Referencias offline calculadas en 2.4 s.
+En línea: 29308 espigas en lotes de 200 en 0.9 s · 3 ids · uniones []
+
+=== Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
+ARI global (sin el ruido de la referencia): -0.005
+Ruido: en línea 2.2 % · referencia 75.6 %
+ARI por tramo de la sesión (5 tramos de 5862): 0.001 · -0.002 · -0.009 · -0.001 · 0.003
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0     3904   13.3%   → 0: 83 % · 2: 17 % · ruido: 0 %
+         1     3238   11.0%   → 0: 90 % · 2: 10 % · ruido: 0 %
+     ruido    22166   75.6%   → 0: 67 % · 2: 19 % · 1: 10 % · ruido: 3 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [0, 1]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
+ARI global (sin el ruido de la referencia): 0.171
+Ruido: en línea 2.2 % · referencia 12.1 %
+ARI por tramo de la sesión (5 tramos de 5862): 0.322 · 0.148 · 0.116 · 0.107 · 0.089
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0    25040   85.4%   → 0: 79 % · 2: 19 % · 1: 1 % · ruido: 1 %
+         1      717    2.4%   → 1: 98 % · ruido: 2 %
+     ruido     3551   12.1%   → 1: 36 % · 0: 35 % · 2: 15 % · ruido: 14 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna

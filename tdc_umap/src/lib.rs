@@ -8,7 +8,7 @@
 //! normalización de entrada y encaje— y `modelo` —`carga_verificada`, que
 //! compara el manifiesto con la red— son **los mismos módulos** que usa la CLI,
 //! reexportados aquí. Un solo `Cargo.lock` fija las mismas versiones de
-//! `fast-umap`, `burn`, `cubecl` y `clump` para los dos: los pesos que guarda la
+//! `fast-umap`, `burn`, `cubecl` y `hdbscan` para los dos: los pesos que guarda la
 //! CLI se cargan aquí con el mismo formato.
 //!
 //! La configuración de UMAP **no se duplica**: se reconstruye del manifiesto que
@@ -31,7 +31,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::modelo::{Manifiesto, RutasDelModelo};
-use crate::motor::{Motor, ParamsDenStream};
+use crate::motor::Motor;
+use umap_mcqueen::agrupador;
 
 /// El mismo backend que `main.rs` de umap-mcqueen.
 pub type MyBackend = burn::backend::wgpu::CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -85,36 +86,44 @@ impl PyClasificador {
     #[new]
     #[pyo3(signature = (
         base, n_dim,
-        epsilon=umap_mcqueen::denstream::EPSILON,
-        min_pts=umap_mcqueen::denstream::MIN_PTS,
-        beta=umap_mcqueen::denstream::BETA,
-        lambda_=umap_mcqueen::denstream::LAMBDA,
-        mu=umap_mcqueen::denstream::MU,
-        macro_epsilon=Some(umap_mcqueen::denstream::MACRO_EPSILON),
-        poda_cada=None, micro_aislado_es_unidad=true,
-        tolerancia=0.15, olvido_lotes=200,
+        ventana=agrupador::VENTANA,
+        vecinos=agrupador::VECINOS,
+        voto_minimo=agrupador::VOTO_MINIMO,
+        arranque=agrupador::ARRANQUE,
+        min_cluster_arranque=agrupador::MIN_CLUSTER_ARRANQUE,
+        min_cluster_size=agrupador::MIN_CLUSTER_SIZE,
+        min_samples=agrupador::MIN_SAMPLES,
+        percentil_radio=agrupador::PERCENTIL_RADIO,
+        factor_nacer=agrupador::FACTOR_NACER,
+        bufer=agrupador::BUFER,
+        auditoria=agrupador::AUDITORIA,
+        auditoria_asincrona=true,
+        unir_tras=agrupador::UNIR_TRAS,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         base: &str,
         n_dim: usize,
-        epsilon: f32,
-        min_pts: usize,
-        beta: f64,
-        lambda_: f64,
-        mu: f64,
-        macro_epsilon: Option<f32>,
-        poda_cada: Option<usize>,
-        micro_aislado_es_unidad: bool,
-        tolerancia: f32,
-        olvido_lotes: u64,
+        ventana: usize,
+        vecinos: usize,
+        voto_minimo: f64,
+        arranque: usize,
+        min_cluster_arranque: usize,
+        min_cluster_size: usize,
+        min_samples: usize,
+        percentil_radio: f64,
+        factor_nacer: f64,
+        bufer: usize,
+        auditoria: usize,
+        auditoria_asincrona: bool,
+        unir_tras: u32,
     ) -> PyResult<Self> {
-        let params = ParamsDenStream {
-            epsilon, min_pts, beta, lambda: lambda_, mu,
-            macro_epsilon, poda_cada, micro_aislado_es_unidad,
+        let params = agrupador::ParamsAgrupador {
+            ventana, vecinos, voto_minimo, arranque, min_cluster_arranque, min_cluster_size, min_samples,
+            percentil_radio, factor_nacer, bufer, auditoria, auditoria_asincrona, unir_tras,
         };
-        let motor = Motor::carga(base, n_dim, params, tolerancia, olvido_lotes)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        params.valida().map_err(PyValueError::new_err)?;
+        let motor = Motor::carga(base, n_dim, params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let info = motor.info.clone();
         Ok(Self { motor: Mutex::new(motor), info })
     }
@@ -122,13 +131,13 @@ impl PyClasificador {
     /// Clasifica un lote `(n, n_dim)` de float64.
     ///
     /// Devuelve `(etiquetas int64 (n,), encaje float32 (n, k), fuera_de_rango,
-    /// n_micro, n_unidades)`. Etiqueta -1 = ruido.
+    /// n_ajustes, n_unidades)`. Etiqueta -1 = ruido.
     #[allow(clippy::type_complexity)]
     fn clasifica<'py>(
         &self,
         py: Python<'py>,
         formas: PyReadonlyArray2<'py, f64>,
-    ) -> PyResult<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray2<f32>>, f64, usize, usize)> {
+    ) -> PyResult<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray2<f32>>, f64, u64, usize)> {
         let lote: Vec<Vec<f64>> = formas.as_array().outer_iter().map(|f| f.to_vec()).collect();
         let n = lote.len();
         let r = py
@@ -149,7 +158,7 @@ impl PyClasificador {
             r.etiquetas.into_pyarray(py),
             encaje.into_pyarray(py),
             r.fuera_de_rango,
-            r.n_micro,
+            r.n_ajustes,
             r.n_unidades,
         ))
     }

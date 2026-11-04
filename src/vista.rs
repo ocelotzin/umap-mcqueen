@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rgb::RGB8;
 use textplots::{Chart, ColorPlot, Shape};
-use umap_mcqueen::denstream::ETIQUETA_RUIDO;
+use umap_mcqueen::agrupador::ETIQUETA_RUIDO;
 
 
 /// Colores por etiqueta: los mismos en la gráfica y en las tablas.
@@ -328,6 +328,32 @@ pub fn raster_sesion(historial: &[BTreeMap<i64, usize>], ancho: usize, max_filas
     salida
 }
 
+// ------------------------------------------------------- eje vertical
+
+/// Rango vertical robusto: percentiles 0.5 y 99.5 de los valores, con un 5 %
+/// de margen. Con el mínimo y el máximo, una sola forma de onda extrema (un
+/// artefacto de −1.2 millones entre espigas de ±150 000) fijaba la escala y
+/// aplastaba todas las demás en dos renglones de braille.
+fn rango_robusto<'a>(valores: impl Iterator<Item = &'a f64>) -> Option<(f64, f64)> {
+    let mut v: Vec<f64> = valores.copied().filter(|x| x.is_finite()).collect();
+    if v.len() < 2 {
+        return None;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let en = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+    let (lo, hi) = (en(0.005), en(0.995));
+    if !(lo < hi) {
+        return None;
+    }
+    let margen = 0.05 * (hi - lo);
+    Some((lo - margen, hi + margen))
+}
+
+/// Lleva un valor al rango: lo que se sale se dibuja pegado al borde.
+fn al_rango(v: f64, (lo, hi): (f64, f64)) -> f32 {
+    v.clamp(lo, hi) as f32
+}
+
 // -------------------------------------------------------- formas de onda
 
 /// Gris tenue para el fondo de formas de onda (más oscuro que el del ruido).
@@ -347,19 +373,15 @@ pub fn formas_de_onda(lote: &[Vec<f64>], etiquetas: &[i64], ancho_px: u32, alto_
     if dim < 2 || lote.iter().any(|f| f.len() != dim) {
         return Vec::new();
     }
-    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
-    for x in lote.iter().flatten().filter(|x| x.is_finite()) {
-        ymin = ymin.min(*x);
-        ymax = ymax.max(*x);
-    }
-    if !(ymin < ymax) {
+    let Some((ymin, ymax)) = rango_robusto(lote.iter().flatten()) else {
         return Vec::new();
-    }
+    };
 
-    // Fondo: todas las formas de onda, en gris.
+    // Fondo: todas las formas de onda, en gris (recortadas al rango robusto).
+    let rango = (ymin, ymax);
     let trazos: Vec<Vec<(f32, f32)>> = lote
         .iter()
-        .map(|f| f.iter().enumerate().map(|(k, &v)| (k as f32, v as f32)).collect())
+        .map(|f| f.iter().enumerate().map(|(k, &v)| (k as f32, al_rango(v, rango))).collect())
         .collect();
 
     // Media por etiqueta (sin el ruido), de la más grande a la más pequeña.
@@ -374,7 +396,7 @@ pub fn formas_de_onda(lote: &[Vec<f64>], etiquetas: &[i64], ancho_px: u32, alto_
     let mut medias: Vec<(i64, usize, Vec<(f32, f32)>)> = sumas
         .into_iter()
         .map(|(e, (s, n))| {
-            let m = s.iter().enumerate().map(|(k, &x)| (k as f32, (x / n as f64) as f32)).collect();
+            let m = s.iter().enumerate().map(|(k, &x)| (k as f32, al_rango(x / n as f64, rango))).collect();
             (e, n, m)
         })
         .collect();
@@ -398,4 +420,157 @@ pub fn formas_de_onda(lote: &[Vec<f64>], etiquetas: &[i64], ancho_px: u32, alto_
     )];
     lineas.extend(format!("{g}").lines().map(str::to_string));
     lineas
+}
+
+// ------------------------------------------------- resumen por etiqueta
+
+/// Lo que se guarda de una etiqueta a lo largo de la sesión.
+struct Acumulado {
+    n: usize,
+    suma: Vec<f64>,
+    /// Muestra uniforme de sus formas de onda (muestreo de reservorio): una
+    /// etiqueta con 20 000 formas de onda guarda las mismas `muestras_max` que
+    /// una con 50, y cada forma tuvo la misma probabilidad de quedarse.
+    muestra: Vec<Vec<f64>>,
+}
+
+/// Resumen de las formas de onda de cada etiqueta en toda la sesión: la
+/// media y una muestra al azar, para dibujar al final una galería con un panel
+/// por etiqueta. Memoria acotada: `muestras_max` formas por etiqueta.
+pub struct ResumenFormas {
+    muestras_max: usize,
+    por_etiqueta: BTreeMap<i64, Acumulado>,
+    rng: rand::rngs::StdRng,
+}
+
+impl ResumenFormas {
+    pub fn new(muestras_max: usize) -> Self {
+        use rand::SeedableRng;
+        Self {
+            muestras_max,
+            por_etiqueta: BTreeMap::new(),
+            // Semilla fija: la misma sesión da la misma galería.
+            rng: rand::rngs::StdRng::seed_from_u64(0),
+        }
+    }
+
+    pub fn agrega(&mut self, lote: &[Vec<f64>], etiquetas: &[i64]) {
+        use rand::Rng;
+        for (forma, &e) in lote.iter().zip(etiquetas) {
+            let a = self.por_etiqueta.entry(e).or_insert_with(|| Acumulado {
+                n: 0,
+                suma: vec![0.0; forma.len()],
+                muestra: Vec::new(),
+            });
+            if a.suma.len() != forma.len() {
+                continue;
+            }
+            a.n += 1;
+            for (s, &x) in a.suma.iter_mut().zip(forma) {
+                *s += x;
+            }
+            if a.muestra.len() < self.muestras_max {
+                a.muestra.push(forma.clone());
+            } else {
+                let j = self.rng.gen_range(0..a.n);
+                if j < self.muestras_max {
+                    a.muestra[j] = forma.clone();
+                }
+            }
+        }
+    }
+
+    /// Galería: un panel por etiqueta (de la más grande a la más pequeña, el
+    /// ruido al final y siempre presente), `por_fila` paneles por renglón y
+    /// como mucho `max_paneles`. Todos con el MISMO eje vertical, para que las amplitudes
+    /// se puedan comparar de un panel a otro. En cada panel, la muestra de
+    /// formas de onda en el color de la etiqueta atenuado y la media encima en
+    /// el color pleno; en un solo color por panel no hay trazos que se tapen.
+    pub fn galeria(&self, por_fila: usize, ancho_px: u32, alto_px: u32, max_paneles: usize) -> String {
+        let total: usize = self.por_etiqueta.values().map(|a| a.n).sum();
+        if total == 0 {
+            return String::new();
+        }
+        let mut orden: Vec<(&i64, &Acumulado)> = self.por_etiqueta.iter().filter(|(_, a)| a.n > 0).collect();
+        orden.sort_by(|a, b| (*a.0 < 0).cmp(&(*b.0 < 0)).then(b.1.n.cmp(&a.1.n)).then(a.0.cmp(b.0)));
+        // El ruido siempre tiene panel (va al final): ver qué se descarta dice
+        // tanto como ver las unidades.
+        let ruido = if orden.last().is_some_and(|(e, _)| **e < 0) { orden.pop() } else { None };
+        let cupo = max_paneles.max(1).saturating_sub(ruido.is_some() as usize).max(1);
+        let omitidas = orden.len().saturating_sub(cupo);
+        orden.truncate(cupo);
+        orden.extend(ruido);
+
+        let dim = orden[0].1.suma.len();
+        // Mismo eje en todos los paneles, robusto a formas de onda extremas.
+        let Some((ymin, ymax)) = rango_robusto(orden.iter().flat_map(|(_, a)| a.muestra.iter().flatten())) else {
+            return String::new();
+        };
+        if dim < 2 {
+            return String::new();
+        }
+
+        let paneles: Vec<Vec<String>> = orden
+            .iter()
+            .map(|&(&e, a)| self.panel(e, a, total, dim, (ymin, ymax), ancho_px, alto_px))
+            .collect();
+
+        let mut salida = String::new();
+        for renglon in paneles.chunks(por_fila.max(1)) {
+            let mut acumulado = renglon[0].join("\n");
+            for p in &renglon[1..] {
+                acumulado = lado_a_lado(&acumulado, p, 4);
+            }
+            salida.push_str(acumulado.trim_end_matches('\n'));
+            salida.push_str("\n\n");
+        }
+        if omitidas > 0 {
+            salida.push_str(&format!("(+{omitidas} etiquetas pequeñas sin panel)\n"));
+        }
+        salida
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn panel(&self, e: i64, a: &Acumulado, total: usize, dim: usize, (ymin, ymax): (f64, f64),
+             ancho_px: u32, alto_px: u32) -> Vec<String> {
+        let media: Vec<f64> = a.suma.iter().map(|s| s / a.n as f64).collect();
+        let c = color_de(e);
+        let tenue = RGB8 { r: c.r / 2, g: c.g / 2, b: c.b / 2 };
+
+        let trazos: Vec<Vec<(f32, f32)>> = a
+            .muestra
+            .iter()
+            .map(|f| f.iter().enumerate().map(|(k, &v)| (k as f32, al_rango(v, (ymin, ymax)))).collect())
+            .collect();
+        let linea_media: Vec<(f32, f32)> =
+            media.iter().enumerate().map(|(k, &v)| (k as f32, al_rango(v, (ymin, ymax)))).collect();
+        let mut formas: Vec<(Shape, RGB8)> = trazos.iter().map(|t| (Shape::Lines(t), tenue)).collect();
+        formas.push((Shape::Lines(&linea_media), c));
+
+        let mut grafica = Chart::new_with_y_range(
+            ancho_px, alto_px, 0.0, (dim - 1) as f32, ymin as f32, ymax as f32);
+        let mut g = &mut grafica;
+        for (forma, color) in &formas {
+            g = g.linecolorplot(forma, *color);
+        }
+        g.axis();
+        g.figures();
+
+        // Valle de la media y el pico que le sigue: lo primero que se mira para
+        // distinguir neuronas.
+        let (k_valle, valle) = media
+            .iter()
+            .copied()
+            .enumerate()
+            .fold((0, f64::INFINITY), |m, (k, v)| if v < m.1 { (k, v) } else { m });
+        let pico = media[k_valle..].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        let titulo = if e < 0 { "ruido".to_string() } else { format!("etiqueta {e}") };
+        let mut lineas = vec![
+            pinta(e, &format!("{titulo} · {} formas ({:.1}%)", a.n, 100.0 * a.n as f64 / total as f64)),
+            format!("valle {valle:.0} (muestra {k_valle}) · pico {pico:.0} · {} dibujadas", a.muestra.len()),
+        ];
+        lineas.extend(format!("{g}").lines().map(str::to_string));
+        lineas
+    }
 }

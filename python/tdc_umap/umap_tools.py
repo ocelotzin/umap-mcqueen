@@ -1,5 +1,5 @@
 """
-Herramientas para el motor ``'umap'`` del Peeler (UMAP paramétrico + DenStream,
+Herramientas para el motor ``'umap'`` del Peeler (UMAP paramétrico + HDBSCAN por ventana,
 de `umap-mcqueen <https://github.com/ocelotzin/umap-mcqueen>`_).
 
 El motor clasifica formas de onda sin plantillas, pero la red de UMAP sólo sabe

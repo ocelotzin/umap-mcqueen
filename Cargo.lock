@@ -1051,16 +1051,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clump"
-version = "0.5.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c03ae66b307a7f3b1dc4c5a62b50a8c1519be2a00fb0a8b3c3c423dcd7f7b37"
-dependencies = [
- "rand 0.9.5",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2971,6 +2961,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdbscan"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "466aa8bfaa22c81efcf67c84e6ad046de13a05c6cc9d41a5094361bff464247a"
+dependencies = [
+ "kdtree",
+ "num-traits",
+ "rayon",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3406,6 +3407,16 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kdtree"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0a0e9f770b65bac9aad00f97a67ab5c5319effed07f6da385da3c2115e47ba"
+dependencies = [
+ "num-traits",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5629,7 +5640,6 @@ name = "tdc-umap"
 version = "0.1.0"
 dependencies = [
  "burn",
- "clump",
  "cubecl",
  "fast-umap",
  "numpy",
@@ -6258,11 +6268,11 @@ name = "umap-mcqueen"
 version = "0.1.0"
 dependencies = [
  "burn",
- "clump",
  "colored 2.2.0",
  "csv",
  "cubecl",
  "fast-umap",
+ "hdbscan",
  "rand 0.8.8",
  "rand_distr 0.4.3",
  "rgb",

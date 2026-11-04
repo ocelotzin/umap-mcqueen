@@ -1,0 +1,39 @@
+Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
+[fast-umap] Configuration:
+[fast-umap]   samples=2000  features=48  k_neighbors=15
+[fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
+[fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
+[fast-umap] Computing global k-NN graph (k=15) …
+[fast-umap] k-NN done in 0.14s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] Training started …
+[fast-umap] Training complete — 200 epochs in 00:00:21, best loss: 0.266272
+18541 espigas de 48 muestras.
+Referencias offline calculadas en 2.2 s.
+En línea: 18541 espigas en lotes de 200 en 0.5 s · 2 ids · uniones []
+
+=== Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
+ARI global (sin el ruido de la referencia): 0.475
+Ruido: en línea 1.7 % · referencia 0.2 %
+ARI por tramo de la sesión (5 tramos de 3709): 0.000 · 0.000 · 0.000 · 0.974 · 0.966
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0    14717   79.4%   → 1: 81 % · 0: 17 % · ruido: 2 %
+         1     3782   20.4%   → 0: 99 % · ruido: 1 % · 1: 0 %
+     ruido       42    0.2%   → ruido: 50 % · 0: 38 % · 1: 12 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
+ARI global (sin el ruido de la referencia): 0.892
+Ruido: en línea 1.7 % · referencia 16.2 %
+ARI por tramo de la sesión (5 tramos de 3709): 0.754 · 1.000 · 1.000 · 0.987 · 0.997
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0    10992   59.3%   → 1: 98 % · ruido: 2 %
+         1     3236   17.5%   → 0: 100 % · ruido: 0 %
+         2     1313    7.1%   → 0: 100 %
+     ruido     3000   16.2%   → 0: 59 % · 1: 37 % · ruido: 4 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [1, 2]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna

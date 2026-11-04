@@ -1,0 +1,38 @@
+Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
+[fast-umap] Configuration:
+[fast-umap]   samples=2000  features=48  k_neighbors=15
+[fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
+[fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
+[fast-umap] Computing global k-NN graph (k=15) …
+[fast-umap] k-NN done in 0.14s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] Training started …
+[fast-umap] Training complete — 200 epochs in 00:00:21, best loss: 0.393710
+18419 espigas de 48 muestras.
+Referencias offline calculadas en 2.3 s.
+En línea: 18419 espigas en lotes de 200 en 0.5 s · 2 ids · uniones []
+
+=== Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
+ARI global (sin el ruido de la referencia): 0.052
+Ruido: en línea 4.0 % · referencia 57.4 %
+ARI por tramo de la sesión (5 tramos de 3684): -0.005 · -0.081 · 0.159 · 0.204 · 0.297
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0     4105   22.3%   → 0: 73 % · 1: 27 % · ruido: 0 %
+         1     3747   20.3%   → 0: 99 % · ruido: 1 %
+     ruido    10567   57.4%   → 0: 73 % · 1: 20 % · ruido: 7 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [0, 1]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): 0 → [1, 0]
+
+=== Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
+ARI global (sin el ruido de la referencia): 0.058
+Ruido: en línea 4.0 % · referencia 60.9 %
+ARI por tramo de la sesión (5 tramos de 3684): 0.030 · -0.032 · 0.128 · 0.161 · 0.211
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         1     4077   22.1%   → 0: 99 % · ruido: 1 %
+         0     3127   17.0%   → 0: 84 % · 1: 16 % · ruido: 0 %
+     ruido    11215   60.9%   → 0: 70 % · 1: 24 % · ruido: 6 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [0, 1]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna

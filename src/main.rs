@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 mod vista;
 
 //Para clustering
-use umap_mcqueen::denstream::Etiquetador;
+use umap_mcqueen::agrupador::Agrupador;
 
 //El núcleo es la biblioteca `umap_mcqueen` (src/lib.rs): el guardado y la carga
 //verificada del modelo, la normalización con referencia fija, el simulador de
@@ -42,6 +42,12 @@ const ANCHO_RASTER: usize = 80;
 const ANCHO_FORMAS_PX: u32 = 160;
 const ALTO_FORMAS_PX: u32 = 64;
 //Filas del raster del lote: lo que queda de la altura del encaje.
+//Galería final: un panel por etiqueta con su media y una muestra de sus formas.
+const GALERIA_MUESTRAS: usize = 40;
+const GALERIA_POR_FILA: usize = 3;
+const GALERIA_ANCHO_PX: u32 = 100;
+const GALERIA_ALTO_PX: u32 = 48;
+const GALERIA_MAX_PANELES: usize = 12;
 const FILAS_RASTER: usize = (ALTO_ENCAJE_PX / 4 - ALTO_FORMAS_PX / 4) as usize - 6;
 const ANCHO_RASTER_SESION: usize = 150;
 
@@ -154,13 +160,16 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
     let config = configuracion(opts.semilla);
 
-    //DenStream + agrupamiento + ids estables: lo mismo que usa tdc_umap (ver
-    //src/denstream.rs, y ojo: clump compara distancias AL CUADRADO).
-    let mut etiquetador = Etiquetador::default();
+    //Cada forma de onda toma la etiqueta de sus vecinas recientes en el encaje
+    //(propagación por vecindad): lo mismo que usa tdc_umap (ver
+    //src/agrupador.rs).
+    let mut etiquetador = Agrupador::default();
     //Formas de onda por etiqueta en toda la sesión.
     let mut conteo_total: BTreeMap<i64, usize> = BTreeMap::new();
     //Formas de onda por etiqueta en cada lote, para el raster de la sesión.
     let mut historial: Vec<BTreeMap<i64, usize>> = Vec::new();
+    //Media y muestra de formas de onda por etiqueta, para la galería final.
+    let mut resumen_formas = vista::ResumenFormas::new(GALERIA_MUESTRAS);
 
     let mut lectr: Option<csv::Reader<File>>;
     let mut records: Box<dyn Iterator<Item = (usize, Result<csv::StringRecord, csv::Error>)>> = Box::new(std::iter::empty());
@@ -286,10 +295,11 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     buffer_crudo.clear();
 
     let mut total_puntos: Vec<(f32, f32)> = Vec::new();
-    //Procesa un lote: encaje, normalización, DenStream y gráfica.
-    let procesa_lote = |lote: &[Vec<f64>], i: usize, etq: &mut Etiquetador, total: &mut Vec<(f32, f32)>,
+    //Procesa un lote: encaje, normalización, agrupador y gráfica.
+    let procesa_lote = |lote: &[Vec<f64>], i: usize, etq: &mut Agrupador, total: &mut Vec<(f32, f32)>,
                         conteo_total: &mut BTreeMap<i64, usize>,
-                        historial: &mut Vec<BTreeMap<i64, usize>>| {
+                        historial: &mut Vec<BTreeMap<i64, usize>>,
+                        resumen_formas: &mut vista::ResumenFormas| {
         //`fast-umap` NO normaliza en `transform`, aunque sí lo hace al entrenar.
         //Sin esta línea la red recibe datos crudos y devuelve coordenadas cinco
         //órdenes de magnitud fuera del encaje.
@@ -303,7 +313,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         let fuera = normalizador.fuera_de_rango(&embedding_normalizado);
 
         //Tenemos que normalizar los datos de salida, esto para que
-        //DenStream trabaje bajo los parametros dados.
+        //el agrupador trabaje en una escala fija.
         let puntos_f32: Vec<Vec<f32>> = embedding_normalizado
             .iter()
             .map(|fila| vec![fila[0] as f32, fila[1] as f32])
@@ -313,7 +323,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         let etiquetas = match etq.etiqueta(&puntos_f32) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("DenStream rechazó el lote {i}: {e}");
+                eprintln!("El agrupador rechazó el lote {i}: {e}");
                 return;
             }
         };
@@ -326,11 +336,12 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         //Con referencia fija, salirse de [0,1] deja de ser imposible y pasa a ser
         //una señal: si crece, el modelo ya no representa lo que llega.
         println!(
-            "--- Lote en índice {}: {} micro clusters → {} unidades vivas · {} etiquetas en el lote · {:.1}% fuera de [0,1] ---",
-            i, etq.n_micro(), etq.n_unidades(), vista::n_etiquetas(&conteo_lote), 100.0 * fuera
+            "--- Lote en índice {}: {} unidades ({} ajustes, {:.0}% fuera desde el último) · {} etiquetas en el lote · {:.1}% fuera de [0,1] ---",
+            i, etq.n_unidades(), etq.n_ajustes(), 100.0 * etq.fraccion_fuera(), vista::n_etiquetas(&conteo_lote), 100.0 * fuera
         );
         println!("{}", vista::proporciones_en_linea(&conteo_lote));
         historial.push(conteo_lote);
+        resumen_formas.agrega(lote, &etiquetas);
 
         let puntos: Vec<(f32, f32)> = embedding_normalizado // Para graficar el embedding,
             .iter()
@@ -360,7 +371,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         ultimo = i;
 
         if buffer_crudo.len() == opts.batch_size {
-            procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial);
+            procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
             buffer_crudo.clear();
         }
     }
@@ -371,7 +382,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             buffer_crudo.push(vector_generado.to_vec());
 
             if buffer_crudo.len() == opts.batch_size {
-                procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial);
+                procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
                 buffer_crudo.clear();
             }
         }
@@ -380,7 +391,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     // Procesa el último buffer, aunque tenga pocos vectores (poco recomendado)
     if !buffer_crudo.is_empty() && INCOMPLETE_BUFF {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
-        procesa_lote(&buffer_crudo, ultimo, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial);
+        procesa_lote(&buffer_crudo, ultimo, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
     }
 
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
@@ -391,6 +402,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     vista::imprime_proporciones(&conteo_total);
     println!();
     print!("{}", vista::raster_sesion(&historial, ANCHO_RASTER_SESION, 24));
+    println!("\nResumen de formas de onda por etiqueta (mismo eje vertical en todos los paneles, percentiles 0,5–99,5; lo que se sale va pegado al borde):\n");
+    print!("{}", resumen_formas.galeria(GALERIA_POR_FILA, GALERIA_ANCHO_PX, GALERIA_ALTO_PX, GALERIA_MAX_PANELES));
 
     Ok(())
 }

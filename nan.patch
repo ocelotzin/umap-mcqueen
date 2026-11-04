@@ -1,0 +1,50 @@
+diff --git a/scripts/compara_carpeta.py b/scripts/compara_carpeta.py
+index 0047ba5..a6734da 100644
+--- a/scripts/compara_carpeta.py
++++ b/scripts/compara_carpeta.py
+@@ -86,8 +86,17 @@ def compila(raiz):
+     return bin_
+ 
+ 
++def valido(x):
++    """Un número que se puede comparar: ni None ni NaN.
++
++    La sonda escribe NaN cuando no hay con qué medir (por ejemplo, un tramo en
++    el que la referencia lo marcó todo como ruido), y JSON lo trae como null.
++    """
++    return isinstance(x, (int, float)) and x == x
++
++
+ def fmt(x, nd=3):
+-    return "—" if x is None or (isinstance(x, float) and x != x) else f"{x:.{nd}f}"
++    return f"{x:.{nd}f}" if valido(x) else "—"
+ 
+ 
+ def main():
+@@ -163,7 +172,7 @@ def main():
+             fila.update(espigas=d["espigas"], ids=d["ids_emitidos"], uniones=d["uniones"])
+             for clave, c in zip(("pca", "encaje"), d["comparaciones"]):
+                 fila[f"ari_{clave}"] = c["ari_global"]
+-                tramos = [x for x in c["ari_por_tramo"] if x == x]
++                tramos = [x for x in c["ari_por_tramo"] if valido(x)]
+                 fila[f"ari_{clave}_min_tramo"] = min(tramos) if tramos else None
+                 fila[f"unidades_ref_{clave}"] = c["unidades_referencia"]
+                 fila[f"fusiones_{clave}"] = len(c["fusiones"])
+@@ -199,13 +208,14 @@ def main():
+             continue
+         print(f"{nombre:<40} {f['espigas']:>8} {f['unidades_en_linea']:>5} {f['unidades_ref_pca']:>4} "
+               f"{fmt(f['ari_pca']):>8} {fmt(f['ari_pca_min_tramo']):>6} {fmt(f['ari_encaje']):>8} "
+-              f"{f['fusiones_pca']:>4} {f['divisiones_pca']:>4} {100 * f['ruido_en_linea']:>5.1f}%")
++              f"{f['fusiones_pca']:>4} {f['divisiones_pca']:>4} {fmt(100 * f['ruido_en_linea'] if valido(f['ruido_en_linea']) else None, 1):>5}%")
+     if ok:
+-        aris = [f["ari_pca"] for f in ok if f["ari_pca"] == f["ari_pca"]]
++        aris = [f["ari_pca"] for f in ok if valido(f["ari_pca"])]
+         if aris:
+             print(f"\nARI contra PCA offline: mediana {statistics.median(aris):.3f} · "
+                   f"mínimo {min(aris):.3f} · máximo {max(aris):.3f}")
+-        dudosos = [f for f in ok if (f["ari_pca"] or 0) < 0.9 or f["fusiones_pca"] or f["divisiones_pca"]
++        dudosos = [f for f in ok if not valido(f["ari_pca"]) or f["ari_pca"] < 0.9
++                   or f["fusiones_pca"] or f["divisiones_pca"]
+                    or f["unidades_en_linea"] != f["unidades_ref_pca"]]
+         if dudosos:
+             print(f"Para revisar ({len(dudosos)}): ARI < 0.9, fusiones, divisiones o distinto número de unidades:")

@@ -33,7 +33,7 @@ umap-mcqueen/
 ├── Cargo.toml            # el núcleo (biblioteca `umap_mcqueen` + la CLI `umap-mcqueen`) y el workspace
 ├── Cargo.lock            # uno solo, para los dos crates
 ├── src/lib.rs            # modelo (manifiesto + carga verificada), normaliza, spikesim, configuracion()
-├── src/main.rs           # la CLI: entrena o carga un modelo, proyecta por lotes, DenStream y gráfica
+├── src/main.rs           # la CLI: entrena o carga un modelo, proyecta por lotes, agrupa (propagación de etiquetas por vecindad) y grafica
 ├── tests/semilla.rs      # la prueba de la semilla
 ├── tdc_umap/             # el puente a tridesclous: crate `tdc-umap` (pyo3) = módulo de Python `tdc_umap._core`
 ├── pyproject.toml        # el paquete de Python `tdc_umap`, construido por maturin
@@ -42,7 +42,7 @@ umap-mcqueen/
 
 `tdc_umap` depende del núcleo **como crate** (`umap-mcqueen = { path = ".." }`), no copiando ficheros: el manifiesto
 del modelo, la normalización y la configuración de UMAP existen una sola vez, y el `Cargo.lock` del workspace fija
-las mismas versiones de `fast-umap`, `burn`, `cubecl` y `clump` para los dos crates. Lo que la CLI guarda, el motor
+las mismas versiones de `fast-umap`, `burn`, `cubecl` y `hdbscan` para los dos crates. Lo que la CLI guarda, el motor
 lo carga con el mismo formato, por construcción.
 
 ## Compilar desde un clon limpio
@@ -71,7 +71,7 @@ para no reinstalarlo.
 ## El motor `engine='umap'` para el Peeler de tridesclous
 
 Clasifica sin plantillas: recorta cada forma de onda como el constructor de catálogos, la proyecta con la red que
-entrenó `umap-mcqueen` y la agrupa con DenStream. Vive en `python/tdc_umap/`:
+entrenó `umap-mcqueen` y la agrupa con HDBSCAN por ventana (`src/agrupador.rs`). Vive en `python/tdc_umap/`:
 
 * `peeler_engine_umap.py` — el motor: `change_params(engine='umap', catalogue=..., umap_modelo='modelos/s1', ...)`,
   en modo `sincrono` o `asincrono` (un hilo que agrupa lotes; con `umap_campo_canal=True` cada espiga lleva su canal).
@@ -79,7 +79,7 @@ entrenó `umap-mcqueen` y la agrupa con DenStream. Vive en `python/tdc_umap/`:
   su descripción de la extracción (`<base>.tdc.json`), y produce el catálogo sin plantillas:
   `python -m tdc_umap.umap_tools <dir DataIO> <base del modelo>`.
 * `tdc_umap.Clasificador` — la clase compilada (Rust): carga el modelo por su manifiesto, lo comprueba y clasifica
-  lotes `(n, n_dim)`; devuelve etiquetas, encaje, fracción fuera de rango y recuentos de DenStream.
+  lotes `(n, n_dim)`; devuelve etiquetas, encaje, fracción fuera de rango y recuentos del agrupador (ajustes y unidades).
 
 **El alta es explícita.** tridesclous no sabe que este paquete existe; `Peeler.change_params` busca el motor en el
 diccionario `peeler_engines`, y `tdc_umap.registrar()` lo pone ahí:
@@ -94,9 +94,9 @@ peeler.change_params(engine='umap', catalogue=catalogo, umap_modelo='modelos/s1'
 (`josemal98/tridesclous-edited`, rama `upstream-mas-mmap`, 5e3fac8). El motor solo le importa
 `peakdetector`, `peeler_tools` y `signalpreprocessor`, en forma absoluta; nada se parchea.
 
-El puente `tdc_umap/` (Rust) tiene tres ficheros propios: `motor.rs` (normaliza → `transform` → normaliza →
-DenStream, por lote, una etiqueta por forma de onda), `identidades.rs` (ids estables entre lotes: DenStream solo da
-posiciones en un `Vec`, que cambian con cada poda) y `lib.rs` (la clase de Python y la configuración de UMAP,
+El puente `tdc_umap/` (Rust) tiene dos ficheros propios: `motor.rs` (normaliza → `transform` → normaliza →
+`umap_mcqueen::agrupador`, por lote, una etiqueta por forma de onda; los ids estables viven en el núcleo,
+`src/identidades.rs`) y `lib.rs` (la clase de Python y la configuración de UMAP,
 reconstruida del manifiesto del modelo). Si `modelo.rs` cambia su API pública (`carga_verificada`, `Manifiesto`,
 `RutasDelModelo`), habrá que ajustar `motor.rs`/`lib.rs`; nada más.
 
@@ -113,8 +113,8 @@ tres modelos y proyecta los mismos datos con ellos; los dos de la semilla 7 coin
 
 Lo que **no** sirve es comparar los `.bin` byte a byte: burn sortea un identificador por parámetro al crear la red
 y lo escribe en el fichero, así que dos modelos con los mismos pesos difieren en unos 50 bytes (medido: 51 de 13 022
-con la misma semilla, frente a 12 190 con otra). Y lo que la semilla **no** fija es lo que viene después del encaje:
-DenStream (`clump`) tiene su propio azar.
+con la misma semilla, frente a 12 190 con otra). Lo que viene después del encaje (`src/agrupador.rs`) es
+determinista: con el mismo encaje da las mismas etiquetas.
 
 Antes de esto, dos entrenamientos idénticos diferían hasta un 19 % de la escala del encaje: `fast-umap` 1.6.0 solo
 siembra el backend, y sus generadores de CPU salían de la entropía.

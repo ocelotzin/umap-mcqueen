@@ -1,0 +1,46 @@
+{
+  "comparaciones": [
+    {
+      "ari_global": 0.9296347459239509,
+      "ari_por_tramo": [
+        0.9276261778208643,
+        0.932132696979583,
+        0.9281423766634772,
+        0.9193945806386915,
+        0.9390630607391889
+      ],
+      "divisiones": [],
+      "fusiones": [
+        "1 ← [0, 2]"
+      ],
+      "referencia": "Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena)",
+      "ruido_en_linea": 0.02526435762679668,
+      "ruido_referencia": 0.15918444880643323,
+      "unidades_en_linea": 2,
+      "unidades_referencia": 3
+    },
+    {
+      "ari_global": 0.948612920713868,
+      "ari_por_tramo": [
+        0.9501698129754823,
+        0.957322513503329,
+        0.9414164135838572,
+        0.9417693635444342,
+        0.95188546148309
+      ],
+      "divisiones": [],
+      "fusiones": [
+        "1 ← [0, 2]"
+      ],
+      "referencia": "Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador)",
+      "ruido_en_linea": 0.02526435762679668,
+      "ruido_referencia": 0.211676059013487,
+      "unidades_en_linea": 2,
+      "unidades_referencia": 3
+    }
+  ],
+  "espigas": 31586,
+  "ids_emitidos": 2,
+  "segundos_en_linea": 1.5082424300000001,
+  "uniones": 0
+}

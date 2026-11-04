@@ -1,7 +1,7 @@
 # El puente a tridesclous: el módulo de Python `tdc_umap._core`, compilado por
 # maturin (ver pyproject.toml en la raíz). Depende del núcleo de umap-mcqueen
 # como crate (`umap-mcqueen = { path = ".." }`) y comparte con él el Cargo.lock
-# del workspace, así que las versiones de fast-umap, burn, cubecl y clump son
+# del workspace, así que las versiones de fast-umap, burn, cubecl y hdbscan son
 # las mismas por construcción: los pesos que guarda la CLI se cargan aquí igual.
 
 [package]
@@ -21,7 +21,6 @@ umap-mcqueen = { path = ".." }
 fast-umap    = { workspace = true }
 burn         = { workspace = true }
 cubecl       = { workspace = true }
-clump        = { workspace = true }
 serde_json   = { workspace = true }
 pyo3         = { version = "0.23", features = ["extension-module"] }
 numpy        = "0.23"

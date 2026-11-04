@@ -1,6 +1,8 @@
-//! Identidades estables para las unidades que encuentra DenStream.
+//! Identidades estables para las unidades que encuentra el agrupador.
 //!
-//! **Por qué hace falta.** `clump::DenStream` no tiene identificadores: lo que
+//! **Por qué hace falta.** (Escrito cuando el agrupador era DenStream; hoy los
+//! ids salen de cada reajuste de HDBSCAN, cuya numeración también es arbitraria.)
+//! `clump::DenStream` no tiene identificadores: lo que
 //! devuelven `update`, `predict` y `macro_cluster` es la *posición* del
 //! micro-cluster dentro de un `Vec`. Esa posición cambia cuando la poda hace
 //! `retain` (todo lo que estaba detrás se recorre) y cuando un outlier se promueve
@@ -41,15 +43,70 @@ impl Identidades {
         Self { unidades: Vec::new(), siguiente: 0, tolerancia, olvido_lotes, lote: 0 }
     }
 
-    /// Asigna un id estable a cada centroide de este lote, en el mismo orden.
+    /// Asigna un id estable a cada centroide de este lote, en el mismo orden,
+    /// sólo por cercanía de centroides.
     pub fn asigna(&mut self, centroides: &[Vec<f32>]) -> Vec<i64> {
+        self.asigna_con_votos(centroides, &vec![Vec::new(); centroides.len()])
+    }
+
+    /// Como `asigna`, pero primero por **herencia**: `votos[i]` dice qué ids
+    /// tenían en el lote anterior las espigas (o micro-clusters) que ahora forman
+    /// la unidad `i`, con su peso.
+    ///
+    /// Se reparten de mayor a menor peso: si dos unidades se unen, la unión
+    /// conserva el id de la que aporta más; si una se parte, el pedazo mayor
+    /// conserva el id. Sólo lo que no hereda nada se empareja por cercanía de
+    /// centroides con las unidades que quedan libres (así una unidad que estuvo
+    /// unida a otra recupera su id al separarse), y lo que tampoco, recibe uno
+    /// nuevo.
+    ///
+    /// Sin esto, una unión de dos unidades tenía el centroide entre ambas, no se
+    /// parecía a ninguna y recibía un id nuevo: con datos reales, la unidad 13
+    /// pasaba a llamarse 33 en los lotes en que se juntaba con la 24.
+    pub fn asigna_con_votos(&mut self, centroides: &[Vec<f32>], votos: &[Vec<(i64, f64)>]) -> Vec<i64> {
         self.lote += 1;
         let mut ids = vec![-1i64; centroides.len()];
+        let mut nuevo_usado = vec![false; centroides.len()];
+        let mut conocido_usado = vec![false; self.unidades.len()];
+        let lote = self.lote;
+        let toma = |unidades: &mut Vec<Unidad>, i: usize, j: usize, ids: &mut Vec<i64>,
+                        nuevo_usado: &mut Vec<bool>, conocido_usado: &mut Vec<bool>| {
+            nuevo_usado[i] = true;
+            conocido_usado[j] = true;
+            ids[i] = unidades[j].id;
+            // El centroide sigue a la unidad: así tolera la deriva lenta.
+            unidades[j].centroide = centroides[i].clone();
+            unidades[j].ultimo_lote = lote;
+        };
 
-        // Todas las parejas (nuevo, conocido) dentro de tolerancia, de cerca a lejos.
+        // 1) Herencia, de mayor a menor peso.
+        let posicion: std::collections::HashMap<i64, usize> =
+            self.unidades.iter().enumerate().map(|(j, u)| (u.id, j)).collect();
+        let mut herencias: Vec<(f64, usize, usize)> = votos
+            .iter()
+            .enumerate()
+            .take(centroides.len())
+            .flat_map(|(i, v)| v.iter().filter_map(move |&(id, w)| Some((w, i, id))))
+            .filter_map(|(w, i, id)| posicion.get(&id).map(|&j| (w, i, j)))
+            .filter(|&(w, _, _)| w > 0.0)
+            .collect();
+        herencias.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, i, j) in herencias {
+            if !nuevo_usado[i] && !conocido_usado[j] {
+                toma(&mut self.unidades, i, j, &mut ids, &mut nuevo_usado, &mut conocido_usado);
+            }
+        }
+
+        // 2) Lo demás, por cercanía con las unidades libres, de cerca a lejos.
         let mut parejas: Vec<(f32, usize, usize)> = Vec::new();
         for (i, c) in centroides.iter().enumerate() {
+            if nuevo_usado[i] {
+                continue;
+            }
             for (j, u) in self.unidades.iter().enumerate() {
+                if conocido_usado[j] {
+                    continue;
+                }
                 let d = distancia(c, &u.centroide);
                 if d <= self.tolerancia {
                     parejas.push((d, i, j));
@@ -57,21 +114,13 @@ impl Identidades {
             }
         }
         parejas.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut nuevo_usado = vec![false; centroides.len()];
-        let mut conocido_usado = vec![false; self.unidades.len()];
         for (_, i, j) in parejas {
-            if nuevo_usado[i] || conocido_usado[j] {
-                continue;
+            if !nuevo_usado[i] && !conocido_usado[j] {
+                toma(&mut self.unidades, i, j, &mut ids, &mut nuevo_usado, &mut conocido_usado);
             }
-            nuevo_usado[i] = true;
-            conocido_usado[j] = true;
-            ids[i] = self.unidades[j].id;
-            // El centroide sigue a la unidad: así tolera la deriva lenta.
-            self.unidades[j].centroide = centroides[i].clone();
-            self.unidades[j].ultimo_lote = self.lote;
         }
 
+        // 3) Ids nuevos.
         for (i, c) in centroides.iter().enumerate() {
             if !nuevo_usado[i] {
                 let id = self.siguiente;
@@ -130,6 +179,20 @@ mod pruebas {
         // Una unidad que se partió en dos: la más cercana hereda el id.
         let b = ids.asigna(&[vec![0.45, 0.5], vec![0.52, 0.5]]);
         assert_eq!(b, vec![1, 0]);
+    }
+
+    #[test]
+    fn una_union_conserva_el_id_de_la_mayor_y_la_menor_lo_recupera() {
+        let mut ids = Identidades::new(0.1, 10);
+        assert_eq!(ids.asigna(&[vec![0.2, 0.2], vec![0.5, 0.2]]), vec![0, 1]);
+        // Se unen: centroide entre ambas, lejos de las dos. Hereda por votos.
+        let union = ids.asigna_con_votos(&[vec![0.32, 0.2]], &[vec![(0, 70.0), (1, 30.0)]]);
+        assert_eq!(union, vec![0], "la unión debe conservar el id de la mayor");
+        // Se separan: las espigas de ambas venían de la 0. El pedazo mayor
+        // conserva el 0 y la menor recupera el 1 por cercanía.
+        let sep = ids.asigna_con_votos(&[vec![0.2, 0.2], vec![0.5, 0.2]], &[vec![(0, 70.0)], vec![(0, 30.0)]]);
+        assert_eq!(sep, vec![0, 1]);
+        assert_eq!(ids.n_ids_emitidos(), 2);
     }
 
     #[test]

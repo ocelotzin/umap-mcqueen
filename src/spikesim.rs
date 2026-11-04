@@ -153,6 +153,14 @@ impl GeneradorMezclaT {
     /// azar una de las distribuciones empalmadas (según su peso) y
     /// muestrea las `DIM` componentes t de esa distribución.
     pub fn generar_vector(&mut self) -> [f64; DIM] {
+        self.generar_con_etiqueta().0
+    }
+
+    /// Como `generar_vector`, y además el índice del componente del que salió:
+    /// la etiqueta verdadera, para comparar un agrupamiento contra ella (ver
+    /// `examples/sonda_contra_referencia.rs`). Consume el generador igual que
+    /// `generar_vector`, así que la misma semilla da los mismos vectores.
+    pub fn generar_con_etiqueta(&mut self) -> ([f64; DIM], usize) {
         let idx = self.elegir_componente();
         let comp = self.componentes[idx].clone();
         let dist = StudentT::new(comp.df).expect("df debe ser > 0");
@@ -161,7 +169,7 @@ impl GeneradorMezclaT {
         for i in 0..DIM {
             v[i] = comp.medias[i] + comp.escalas[i] * dist.sample(&mut self.rng);
         }
-        v
+        (v, idx)
     }
 
     /// Atajo para generar `n` vectores de una vez.

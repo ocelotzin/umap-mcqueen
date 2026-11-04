@@ -14,7 +14,8 @@ members = ["tdc_umap"]
 fast-umap  = "1.6.0"
 burn       = { version = "0.20.1", features = ["wgpu", "autodiff", "autotune"] }
 cubecl     = { version = "0.9.0",  features = ["wgpu"] }
-clump      = "0.5.8"
+# HDBSCAN en Rust puro: núcleos con kd-tree, árbol de Prim (memoria O(n)).
+hdbscan    = { version = "0.12", features = ["parallel"] }
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -22,7 +23,7 @@ serde_json = "1.0"
 fast-umap  = { workspace = true }
 burn       = { workspace = true }
 cubecl     = { workspace = true }
-clump      = { workspace = true }
+hdbscan    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 csv        = "1.1"

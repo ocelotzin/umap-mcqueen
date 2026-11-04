@@ -1,0 +1,38 @@
+Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
+[fast-umap] Configuration:
+[fast-umap]   samples=2000  features=48  k_neighbors=15
+[fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
+[fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
+[fast-umap] Computing global k-NN graph (k=15) …
+[fast-umap] k-NN done in 0.14s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] Training started …
+[fast-umap] Training complete — 200 epochs in 00:00:22, best loss: 0.327044
+31226 espigas de 48 muestras.
+Referencias offline calculadas en 2.7 s.
+En línea: 31226 espigas en lotes de 200 en 0.9 s · 2 ids · uniones []
+
+=== Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
+ARI global (sin el ruido de la referencia): 0.602
+Ruido: en línea 2.7 % · referencia 1.8 %
+ARI por tramo de la sesión (5 tramos de 6246): 0.351 · 0.550 · 0.635 · 0.735 · 0.748
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0    27068   86.7%   → 0: 90 % · 1: 9 % · ruido: 1 %
+         1     3592   11.5%   → 1: 89 % · ruido: 11 %
+     ruido      566    1.8%   → ruido: 40 % · 1: 31 % · 0: 30 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
+ARI global (sin el ruido de la referencia): 0.617
+Ruido: en línea 2.7 % · referencia 4.2 %
+ARI por tramo de la sesión (5 tramos de 6246): 0.382 · 0.553 · 0.638 · 0.747 · 0.755
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         0    26502   84.9%   → 0: 91 % · 1: 9 % · ruido: 0 %
+         1     3402   10.9%   → 1: 90 % · ruido: 10 %
+     ruido     1322    4.2%   → 0: 37 % · ruido: 34 % · 1: 29 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna

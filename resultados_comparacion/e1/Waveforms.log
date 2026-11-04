@@ -1,0 +1,40 @@
+Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
+[fast-umap] Configuration:
+[fast-umap]   samples=2000  features=48  k_neighbors=15
+[fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
+[fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
+[fast-umap] Computing global k-NN graph (k=15) …
+[fast-umap] k-NN done in 0.21s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] Training started …
+[fast-umap] Training complete — 200 epochs in 00:00:24, best loss: 0.300189
+31586 espigas de 48 muestras.
+Referencias offline calculadas en 4.3 s.
+En línea: 31586 espigas en lotes de 200 en 1.5 s · 2 ids · uniones []
+
+=== Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
+ARI global (sin el ruido de la referencia): 0.930
+Ruido: en línea 2.5 % · referencia 15.9 %
+ARI por tramo de la sesión (5 tramos de 6318): 0.928 · 0.932 · 0.928 · 0.919 · 0.939
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         1    18209   57.6%   → 0: 100 % · ruido: 0 % · 1: 0 %
+         2     7047   22.3%   → 1: 99 % · 0: 1 % · ruido: 0 %
+         0     1302    4.1%   → 1: 91 % · ruido: 8 % · 0: 1 %
+     ruido     5028   15.9%   → 0: 51 % · 1: 36 % · ruido: 12 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 1 ← [0, 2]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
+ARI global (sin el ruido de la referencia): 0.949
+Ruido: en línea 2.5 % · referencia 21.2 %
+ARI por tramo de la sesión (5 tramos de 6318): 0.950 · 0.957 · 0.941 · 0.942 · 0.952
+
+referencia  espigas       %   → en línea (fracción de sus espigas)
+         1    16708   52.9%   → 0: 100 % · ruido: 0 %
+         2     7273   23.0%   → 1: 99 % · 0: 1 % · ruido: 0 %
+         0      919    2.9%   → 1: 93 % · ruido: 7 %
+     ruido     6686   21.2%   → 0: 61 % · 1: 29 % · ruido: 11 %
+
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 1 ← [0, 2]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna

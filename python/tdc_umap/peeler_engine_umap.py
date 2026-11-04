@@ -1,6 +1,6 @@
 """
 Motor ``'umap'`` del Peeler: clasificación **sin plantillas** con UMAP paramétrico
-+ DenStream (`umap-mcqueen <https://github.com/ocelotzin/umap-mcqueen>`_).
++ propagación por vecindad (`umap-mcqueen <https://github.com/ocelotzin/umap-mcqueen>`_).
 
 Se elige como cualquier otro motor::
 
@@ -17,10 +17,12 @@ necesita plantillas: vale uno normal o el de :func:`umap_tools.catalogo_sin_plan
 
 Cambia la clasificación. En vez de buscar la plantilla que mejor encaja y
 restarla (peeling), cada pico se recorta, se proyecta con la red de UMAP y se
-asigna con DenStream. Consecuencias:
+asigna a una unidad por propagación: cada espiga toma la etiqueta de sus
+vecinas recientes en el encaje. Consecuencias:
 
 * **Unidades nuevas durante la sesión.** Una neurona que no estaba en el
-  entrenamiento recibe un id nuevo en cuanto DenStream la ve densa. Si su forma
+  entrenamiento recibe un id nuevo en cuanto sus espigas, que quedan fuera de
+  toda unidad, forman un grupo denso lejos de las demás. Si su forma
   de onda cae, una vez proyectada, sobre una unidad conocida, se fusiona con ella:
   el descubrimiento depende de que la red la separe.
 * **Sin peeling.** Dos espigas superpuestas dan una sola forma de onda mezclada;
@@ -100,7 +102,7 @@ class _Trabajador:
         self.cola = queue.Queue(maxsize=int(tam_cola))
         self.resultados = deque()
         self.estadisticas = dict(clasificadas=0, descartadas=0, errores=0, ms=deque(maxlen=200),
-                                 fuera=deque(maxlen=200), n_micro=0, n_unidades=0)
+                                 fuera=deque(maxlen=200), n_ajustes=0, n_unidades=0)
         self._hilo = threading.Thread(target=self._bucle, name='tdc-umap', daemon=True)
         self._hilo.start()
 
@@ -170,11 +172,11 @@ class _Trabajador:
             canales = np.concatenate([p[1] for p in pend])
             formas = np.concatenate([p[2] for p in pend])
             t0 = time.perf_counter()
-            etiquetas, _encaje, fuera, n_micro, n_uni = self.clasificador.clasifica(formas)
+            etiquetas, _encaje, fuera, n_ajustes, n_uni = self.clasificador.clasifica(formas)
             e = self.estadisticas
             e['ms'].append((time.perf_counter() - t0) * 1000.0)
             e['fuera'].append(float(fuera))
-            e['n_micro'], e['n_unidades'] = int(n_micro), int(n_uni)
+            e['n_ajustes'], e['n_unidades'] = int(n_ajustes), int(n_uni)
             e['clasificadas'] += indices.size
             self.resultados.append((indices, np.asarray(etiquetas, dtype='int64'), canales))
         except Exception as exc:  # el hilo no puede morir en silencio
@@ -195,6 +197,7 @@ class PeelerEngineUmap:
     def change_params(self, catalogue=None, chunksize=1024, internal_dtype='float32',
                       save_bad_label=False,
                       umap_modelo=None,
+                      umap_agrupador=None,
                       umap_denstream=None,
                       umap_modo='asincrono',
                       umap_lote=64,
@@ -212,9 +215,19 @@ class PeelerEngineUmap:
             Sólo se usan preprocesado, detección, ruido y ventana.
         umap_modelo: str
             Ruta base de ``umap-mcqueen --modelo`` (``<base>.bin`` + ``<base>.json``).
-        umap_denstream: dict
-            Para ``tdc_umap.Clasificador``: epsilon, min_pts, beta, lambda_, mu,
-            macro_epsilon, poda_cada, micro_aislado_es_unidad, tolerancia, olvido_lotes.
+        umap_agrupador: dict
+            Para ``tdc_umap.Clasificador`` (ver ``umap_mcqueen::agrupador``,
+            propagación de etiquetas por vecindad): ``ventana`` (espigas con
+            etiqueta que se recuerdan), ``vecinos`` (las que votan),
+            ``voto_minimo`` (fracción de votos para propagar la etiqueta),
+            ``arranque`` y ``min_cluster_arranque`` (HDBSCAN del arranque),
+            ``min_cluster_size`` y ``min_samples`` (HDBSCAN de los nacimientos), ``percentil_radio`` (cuándo una
+            espiga es ruido), ``factor_nacer`` (cuán lejos de toda unidad tiene
+            que estar un grupo para nacer), ``bufer``, ``auditoria`` (cada
+            cuántas espigas se audita) y ``auditoria_asincrona``.
+        umap_denstream:
+            Ya no existe: el clasificador dejó de usar DenStream. Si se pasa, es
+            un error (sus parámetros no tienen equivalente).
         umap_modo: 'asincrono' | 'sincrono'
         umap_lote, umap_vaciar_cada_s, umap_tam_cola:
             Sólo modo asíncrono: formas por llamada a Rust, latencia máxima y
@@ -245,7 +258,11 @@ class PeelerEngineUmap:
         self.internal_dtype = internal_dtype
         self.save_bad_label = bool(save_bad_label)
         self.umap_modelo = umap_modelo
-        self.umap_denstream = dict(umap_denstream or {})
+        if umap_denstream:
+            raise ValueError("umap_denstream ya no existe: el clasificador usa HDBSCAN por ventana "
+                             "propaga etiquetas por vecindad. Usa umap_agrupador (ventana, vecinos, "
+                             "min_cluster_size, min_samples, confianza, ...).")
+        self.umap_agrupador = dict(umap_agrupador or {})
         self.umap_modo = umap_modo
         self.umap_lote = umap_lote
         self.umap_vaciar_cada_s = umap_vaciar_cada_s
@@ -319,14 +336,14 @@ class PeelerEngineUmap:
         if self.clasificador is None:
             tdc_umap = importa_motor_rust()
             self.clasificador = tdc_umap.Clasificador(self.umap_modelo, self.n_dim,
-                                                      **self.umap_denstream)
+                                                      **self.umap_agrupador)
         if self.umap_modo == 'asincrono' and self._trabajador is None:
             self._trabajador = _Trabajador(self.clasificador, self.umap_lote,
                                            self.umap_vaciar_cada_s, self.umap_tam_cola)
 
         self.estadisticas = dict(detectadas=0, aliens=0, emitidas=0, ruido=0,
                                  ms_sincrono=deque(maxlen=200), fuera=deque(maxlen=200),
-                                 n_micro=0, n_unidades=0)
+                                 n_ajustes=0, n_unidades=0)
         self.initialize_before_each_segment(already_processed=already_processed)
 
     def _comprueba_descripcion(self):
@@ -476,11 +493,11 @@ class PeelerEngineUmap:
 
     def _clasifica_sincrono(self, formas):
         t0 = time.perf_counter()
-        etiquetas, _encaje, fuera, n_micro, n_uni = self.clasificador.clasifica(formas)
+        etiquetas, _encaje, fuera, n_ajustes, n_uni = self.clasificador.clasifica(formas)
         e = self.estadisticas
         e['ms_sincrono'].append((time.perf_counter() - t0) * 1000.0)
         e['fuera'].append(float(fuera))
-        e['n_micro'], e['n_unidades'] = int(n_micro), int(n_uni)
+        e['n_ajustes'], e['n_unidades'] = int(n_ajustes), int(n_uni)
         return np.asarray(etiquetas, dtype='int64')
 
     def _junta(self, piezas):
@@ -513,7 +530,7 @@ class PeelerEngineUmap:
             t = self._trabajador.estadisticas
             e.update(en_cola=self._trabajador.en_cola, descartadas=t['descartadas'],
                      errores=t['errores'], clasificadas=t['clasificadas'],
-                     n_micro=t['n_micro'], n_unidades=t['n_unidades'])
+                     n_ajustes=t['n_ajustes'], n_unidades=t['n_unidades'])
             ms, fuera = t['ms'], t['fuera']
         else:
             e.update(en_cola=0, descartadas=0, errores=0)
