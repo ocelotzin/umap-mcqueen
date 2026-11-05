@@ -281,6 +281,45 @@ struct Medidas {
     unidades_en_linea: usize,
     fusiones: Vec<String>,
     divisiones: Vec<String>,
+    /// ARI después de juntar las unidades en línea que corresponden a la misma
+    /// unidad de referencia: partir una unidad no cuenta como error.
+    ari_tolerante: f64,
+    /// Fracción de las espigas con unidad (en ambos lados) que caen en la unidad
+    /// de referencia mayoritaria de su unidad en línea: mide las fusiones y las
+    /// espigas mal asignadas, y no penaliza las divisiones.
+    pureza: f64,
+    /// Unidades en línea de al menos 0.5 % por unidad de referencia de ese tamaño.
+    unidades_por_referencia: f64,
+}
+
+/// Pasa cada etiqueta en línea a la unidad de referencia con la que comparte más
+/// espigas (sin contar el ruido de la referencia). Varias unidades en línea que
+/// corresponden a la misma unidad de referencia quedan juntas: una división no
+/// es un error. Una unidad en línea sin espigas con referencia conserva una
+/// etiqueta propia; el ruido en línea sigue siendo ruido.
+fn tolera_divisiones(en_linea: &[i64], referencia: &[i64]) -> (Vec<i64>, f64) {
+    let mut conjunta: HashMap<(i64, i64), usize> = HashMap::new();
+    for (&l, &r) in en_linea.iter().zip(referencia) {
+        if l >= 0 && r >= 0 {
+            *conjunta.entry((l, r)).or_default() += 1;
+        }
+    }
+    let mut mayoritaria: HashMap<i64, (i64, usize)> = HashMap::new();
+    for (&(l, r), &k) in &conjunta {
+        let e = mayoritaria.entry(l).or_insert((r, 0));
+        if k > e.1 || (k == e.1 && r < e.0) {
+            *e = (r, k);
+        }
+    }
+    // Etiquetas en línea sin correspondencia: lejos de cualquier id de referencia.
+    let desplaza = 1_000_000_000;
+    let tolerante: Vec<i64> = en_linea
+        .iter()
+        .map(|&l| if l < 0 { l } else { mayoritaria.get(&l).map(|&(r, _)| r).unwrap_or(desplaza + l) })
+        .collect();
+    let total: usize = conjunta.values().sum();
+    let bien: usize = mayoritaria.values().map(|&(_, k)| k).sum();
+    (tolerante, if total == 0 { f64::NAN } else { bien as f64 / total as f64 })
 }
 
 fn informe(titulo: &str, en_linea: &[i64], referencia: &[i64], tramos: usize, es_verdad: bool) -> Medidas {
@@ -289,6 +328,10 @@ fn informe(titulo: &str, en_linea: &[i64], referencia: &[i64], tramos: usize, es
     let ruido_l = en_linea.iter().filter(|&&e| e < 0).count() as f64 / n as f64;
     let ruido_r = referencia.iter().filter(|&&e| e < 0).count() as f64 / n as f64;
     println!("ARI global (sin el ruido de la referencia): {:.3}", ari_sin_ruido_ref(en_linea, referencia));
+    let (tolerante, pureza) = tolera_divisiones(en_linea, referencia);
+    let ari_tolerante = ari_sin_ruido_ref(&tolerante, referencia);
+    println!("ARI tolerando divisiones (unidades en línea de una misma unidad de referencia, juntas): {:.3} · pureza {:.3}",
+             ari_tolerante, pureza);
     println!("Ruido: en línea {:.1} % · referencia {:.1} %", 100.0 * ruido_l, 100.0 * ruido_r);
 
     let t = n.div_ceil(tramos);
@@ -387,6 +430,11 @@ fn informe(titulo: &str, en_linea: &[i64], referencia: &[i64], tramos: usize, es
         unidades_en_linea: grandes(&tam_lin),
         fusiones: fusiones.clone(),
         divisiones: divisiones.clone(),
+        ari_tolerante,
+        pureza,
+        unidades_por_referencia: if grandes(&tam_ref) == 0 { f64::NAN } else {
+            grandes(&tam_lin) as f64 / grandes(&tam_ref) as f64
+        },
     };
     if es_verdad {
         // Retraso de detección: desde la primera espiga de cada unidad verdadera

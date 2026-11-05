@@ -196,6 +196,8 @@ def main():
                 fila[f"fusiones_{clave}"] = len(c["fusiones"])
                 fila[f"divisiones_{clave}"] = len(c["divisiones"])
                 fila[f"ruido_ref_{clave}"] = c["ruido_referencia"]
+                fila[f"ari_{clave}_tolerante"] = c.get("ari_tolerante")
+                fila[f"pureza_{clave}"] = c.get("pureza")
             for clave, c in (d.get("calidad") or {}).items():
                 fila[f"buenas_{clave}"] = c["n_buenas"]
                 fila[f"unidades_{clave}"] = len(c["unidades"])
@@ -210,6 +212,7 @@ def main():
     # resumen.csv
     campos = ["archivo", "origen", "espigas", "unidades_en_linea", "unidades_ref_pca", "unidades_ref_encaje",
               "ari_pca", "ari_pca_min_tramo", "ari_encaje", "ari_encaje_min_tramo",
+              "ari_pca_tolerante", "pureza_pca", "ari_encaje_tolerante", "pureza_encaje",
               "fusiones_pca", "divisiones_pca", "fusiones_encaje", "divisiones_encaje",
               "ruido_en_linea", "ruido_ref_pca", "ruido_ref_encaje",
               "buenas_en_linea", "buenas_referencia_pca", "buenas_referencia_encaje",
@@ -242,6 +245,11 @@ def main():
         if aris:
             print(f"\nARI contra PCA offline: mediana {statistics.median(aris):.3f} · "
                   f"mínimo {min(aris):.3f} · máximo {max(aris):.3f}")
+        tol = [f["ari_pca_tolerante"] for f in ok if valido(f.get("ari_pca_tolerante"))]
+        pur = [f["pureza_pca"] for f in ok if valido(f.get("pureza_pca"))]
+        if tol:
+            print(f"ARI tolerando divisiones: mediana {statistics.median(tol):.3f} · "
+                  f"pureza mediana {statistics.median(pur):.3f}" if pur else "")
         dudosos = [f for f in ok if not valido(f["ari_pca"]) or f["ari_pca"] < 0.9
                    or f["fusiones_pca"] or f["divisiones_pca"]
                    or f["unidades_en_linea"] != f["unidades_ref_pca"]]
