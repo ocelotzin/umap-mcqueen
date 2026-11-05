@@ -40,7 +40,8 @@
 //! --tiempos STime.csv (tiempo de cada espiga, en muestras; activa la calidad
 //! sin verdad de campo: violaciones refractarias, contaminación, presencia,
 //! SNR, aislamiento; ver `umap_mcqueen::calidad`) · --fs Hz (30000) ·
-//! --refractario-ms (2).
+//! --refractario-ms (2) · --voto-minimo, --percentil-radio, --factor-nacer
+//! (parámetros del agrupador en línea; ver `umap_mcqueen::agrupador`).
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -578,7 +579,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             ])
         };
 
-    let mut agr = Agrupador::new(ParamsAgrupador { auditoria_asincrona: false, ..Default::default() })?;
+    // Parámetros del agrupador que se pueden variar desde fuera, para probar
+    // políticas más o menos exigentes con las espigas dudosas.
+    let mut pa = ParamsAgrupador { auditoria_asincrona: false, ..Default::default() };
+    if let Some(v) = opcion("--voto-minimo") {
+        pa.voto_minimo = v.parse()?;
+    }
+    if let Some(v) = opcion("--percentil-radio") {
+        pa.percentil_radio = v.parse()?;
+    }
+    if let Some(v) = opcion("--factor-nacer") {
+        pa.factor_nacer = v.parse()?;
+    }
+    println!("Agrupador: voto_minimo {} · percentil_radio {} · factor_nacer {}",
+             pa.voto_minimo, pa.percentil_radio, pa.factor_nacer);
+    let mut agr = Agrupador::new(pa)?;
     let t0 = Instant::now();
     let mut en_linea = Vec::with_capacity(encaje.len());
     for t in encaje.chunks(lote) {
