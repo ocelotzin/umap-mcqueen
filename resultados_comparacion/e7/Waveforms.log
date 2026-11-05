@@ -4,35 +4,65 @@ Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
 [fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
 [fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
 [fast-umap] Computing global k-NN graph (k=15) …
-[fast-umap] k-NN done in 0.14s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] k-NN done in 0.20s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
 [fast-umap] Training started …
-[fast-umap] Training complete — 200 epochs in 00:00:21, best loss: 0.393710
-18419 espigas de 48 muestras.
-Referencias offline calculadas en 2.3 s.
-En línea: 18419 espigas en lotes de 200 en 0.5 s · 2 ids · uniones []
+[fast-umap] Training complete — 200 epochs in 00:00:22, best loss: 0.310072
+45930 espigas de 48 muestras.
+Referencias offline calculadas en 6.0 s.
+En línea: 45930 espigas en lotes de 200 en 2.3 s · 4 ids · uniones [(1, 0), (3, 0)]
 
 === Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
-ARI global (sin el ruido de la referencia): 0.052
-Ruido: en línea 4.0 % · referencia 57.4 %
-ARI por tramo de la sesión (5 tramos de 3684): -0.005 · -0.081 · 0.159 · 0.204 · 0.297
+ARI global (sin el ruido de la referencia): 0.679
+Ruido: en línea 2.5 % · referencia 29.9 %
+ARI por tramo de la sesión (5 tramos de 9186): 0.764 · 0.761 · 0.572 · 0.600 · 0.641
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-         0     4105   22.3%   → 0: 73 % · 1: 27 % · ruido: 0 %
-         1     3747   20.3%   → 0: 99 % · ruido: 1 %
-     ruido    10567   57.4%   → 0: 73 % · 1: 20 % · ruido: 7 %
+         2    27385   59.6%   → 0: 98 % · 1: 1 % · ruido: 1 % · 3: 0 %
+         0     2416    5.3%   → 2: 95 % · ruido: 5 % · 0: 1 % · 1: 0 %
+         3     1648    3.6%   → 0: 70 % · 1: 30 % · ruido: 0 %
+         1      730    1.6%   → 0: 67 % · 3: 31 % · ruido: 2 %
+     ruido    13751   29.9%   → 0: 76 % · 1: 12 % · 3: 6 % · ruido: 6 %
 
-Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [0, 1]
-Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): 0 → [1, 0]
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [1, 2, 3]
+Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): 1 → [0, 3] · 3 → [0, 1]
 
 === Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
-ARI global (sin el ruido de la referencia): 0.058
-Ruido: en línea 4.0 % · referencia 60.9 %
-ARI por tramo de la sesión (5 tramos de 3684): 0.030 · -0.032 · 0.128 · 0.161 · 0.211
+ARI global (sin el ruido de la referencia): 0.498
+Ruido: en línea 2.5 % · referencia 4.5 %
+ARI por tramo de la sesión (5 tramos de 9186): 0.217 · 0.268 · 1.000 · 0.999 · 1.000
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-         1     4077   22.1%   → 0: 99 % · ruido: 1 %
-         0     3127   17.0%   → 0: 84 % · 1: 16 % · ruido: 0 %
-     ruido    11215   60.9%   → 0: 70 % · 1: 24 % · ruido: 6 %
+         0    41545   90.5%   → 0: 91 % · 1: 6 % · 3: 2 % · ruido: 1 %
+         1     2299    5.0%   → 2: 97 % · ruido: 3 %
+     ruido     2086    4.5%   → 0: 53 % · ruido: 33 % · 3: 6 % · 2: 6 %
 
-Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 0 ← [0, 1]
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
 Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Calidad de las unidades (sin verdad de campo) ===
+Sesión de 1345 s en 150 segmento(s) · tiempo muerto del detector 1.63 ms · refractario 2 ms
+Buena = intervalos < 2 ms en menos del 1 % · presencia ≥ 0.9 · distancia de aislamiento ≥ 20 (o L-ratio < 0.1 si no se define)
+
+método             unidades  buenas espigas en buenas
+en_linea                  4       1             5.1%
+referencia_pca            4       1             5.3%
+referencia_encaje         2       1             5.0%
+
+en_linea:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         0    38919    28.9   3148   8.12%    1.000     1.00    3.5        —    0.024    0.21  
+         1     2392     1.8      7   0.30%    1.000     0.35   10.7      3.0    1.572    0.39  
+         2     2354     1.8      0   0.00%    0.000     1.00   25.7     69.9    0.013    0.73  ✓ buena
+         3     1124     0.8      0   0.00%    0.000     0.35    3.3      2.4    3.210    0.37  
+
+referencia_pca:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         2    27385    20.4    593   2.18%    1.000     1.00    4.8        —    0.008    0.56  
+         0     2416     1.8      0   0.00%    0.000     1.00   25.9     84.1    0.001    0.75  ✓ buena
+         3     1648     1.2      2   0.13%    1.000     1.00   17.4     13.3    0.092    0.72  
+         1      730     0.5      0   0.00%    0.000     1.00    7.0     11.5    0.141    0.72  
+
+referencia_encaje:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         0    41545    30.9   3659   8.84%    1.000     1.00    3.6        —    0.005    0.75  
+         1     2299     1.7      0   0.00%    0.000     1.00   27.1     83.6    0.007    0.81  ✓ buena

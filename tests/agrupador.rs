@@ -310,3 +310,35 @@ fn continuidad_de_un_lote_al_siguiente() {
     println!("continuidad: peor cambio de un lote al siguiente {:.2} % · {} ids", 100.0 * peor, agr.n_ids_emitidos());
     assert!(peor < 0.03, "peor cambio {:.2} %", 100.0 * peor);
 }
+
+/// Una unidad pequeña que el arranque no llega a formar (pocas espigas suyas
+/// entre las 200 primeras) y que la propagación pega a su vecina grande: la
+/// auditoría ve que esa etiqueta es dueña de dos clusters y, tras varias
+/// auditorías seguidas, la separa. Es el caso de una sesión que empieza a mitad
+/// de la grabación.
+#[test]
+fn una_unidad_absorbida_al_arrancar_se_separa() {
+    for semilla in [21u64, 22, 23] {
+        let mut rng = StdRng::seed_from_u64(semilla);
+        let n = 40_000;
+        // La pequeña no está en el arranque (empieza en la espiga 300), como
+        // cuando la sesión arranca en un tramo en que no dispara.
+        let datos: Vec<(Vec<f32>, i32)> = (0..n)
+            .map(|i| {
+                if i >= 300 && rng.r#gen::<f32>() < 0.07 {
+                    (vec![0.6 + g(0.012).sample(&mut rng), 0.5 + g(0.012).sample(&mut rng)], 1)
+                } else {
+                    (vec![0.45 + g(0.04).sample(&mut rng), 0.5 + g(0.04).sample(&mut rng)], 0)
+                }
+            })
+            .collect();
+        let mut agr = sincrono();
+        let r = corre(&mut agr, &datos);
+        let (_, grande) = fidelidad(&r, 0, n / 2..n);
+        let (f, pequena) = fidelidad(&r, 1, n / 2..n);
+        println!("semilla {semilla}: grande → {grande}, pequeña → {pequena} ({f:.2}) · separaciones {:?} · uniones {:?}",
+                 agr.separaciones(), agr.uniones());
+        assert_ne!(grande, pequena, "semilla {semilla}: la pequeña sigue dentro de la grande");
+        assert!(f > 0.8);
+    }
+}

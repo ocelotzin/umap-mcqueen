@@ -4,31 +4,52 @@ Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
 [fast-umap]   epochs=200  lr=1e-3  repulsion_strength=1
 [fast-umap]   kernel: a=1.5680  b=0.9000  (q = 1 / (1 + a·d^(2b)))
 [fast-umap] Computing global k-NN graph (k=15) …
-[fast-umap] k-NN done in 0.14s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
+[fast-umap] k-NN done in 0.22s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
 [fast-umap] Training started …
-[fast-umap] Training complete — 200 epochs in 00:00:21, best loss: 0.395651
-11914 espigas de 48 muestras.
-Referencias offline calculadas en 1.2 s.
-En línea: 11914 espigas en lotes de 200 en 0.2 s · 2 ids · uniones []
+[fast-umap] Training complete — 200 epochs in 00:00:22, best loss: 0.352317
+2978 espigas de 48 muestras.
+Referencias offline calculadas en 0.4 s.
+En línea: 2978 espigas en lotes de 200 en 0.0 s · 3 ids · uniones []
 
 === Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
 ARI global (sin el ruido de la referencia): NaN
-Ruido: en línea 5.8 % · referencia 100.0 %
-ARI por tramo de la sesión (5 tramos de 2383): NaN · NaN · NaN · NaN · NaN
+Ruido: en línea 45.1 % · referencia 100.0 %
+ARI por tramo de la sesión (5 tramos de 596): NaN · NaN · NaN · NaN · NaN
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-     ruido    11914  100.0%   → 1: 67 % · 0: 27 % · ruido: 6 %
+     ruido     2978  100.0%   → ruido: 45 % · 1: 29 % · 2: 14 % · 0: 11 %
 
 Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
 Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
 
 === Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
 ARI global (sin el ruido de la referencia): NaN
-Ruido: en línea 5.8 % · referencia 100.0 %
-ARI por tramo de la sesión (5 tramos de 2383): NaN · NaN · NaN · NaN · NaN
+Ruido: en línea 45.1 % · referencia 100.0 %
+ARI por tramo de la sesión (5 tramos de 596): NaN · NaN · NaN · NaN · NaN
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-     ruido    11914  100.0%   → 1: 67 % · 0: 27 % · ruido: 6 %
+     ruido     2978  100.0%   → ruido: 45 % · 1: 29 % · 2: 14 % · 0: 11 %
 
 Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
 Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Calidad de las unidades (sin verdad de campo) ===
+Sesión de 1193 s en 150 segmento(s) · tiempo muerto del detector 1.63 ms · refractario 2 ms
+Buena = intervalos < 2 ms en menos del 1 % · presencia ≥ 0.9 · distancia de aislamiento ≥ 20 (o L-ratio < 0.1 si no se define)
+
+método             unidades  buenas espigas en buenas
+en_linea                  3       0             0.0%
+referencia_pca            0       0             0.0%
+referencia_encaje         0       0             0.0%
+
+en_linea:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         1      862     0.7      9   1.17%    1.000     0.70    4.8      4.8    0.724   -0.08  
+         2      431     0.4      0   0.00%    0.000     0.70    6.1      5.4    0.663    0.10  
+         0      342     0.3      0   0.00%    0.000     0.90    6.5      8.6    0.323    0.38  
+
+referencia_pca:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+
+referencia_encaje:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  

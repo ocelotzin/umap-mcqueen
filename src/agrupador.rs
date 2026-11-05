@@ -93,6 +93,17 @@ pub const FRACCION_UNIR: f64 = 0.6;
 /// Auditorías seguidas con la misma unión antes de aplicarla. Una cercanía
 /// pasajera (dos neuronas que se acercan por deriva) no basta.
 pub const UNIR_TRAS: u32 = 3;
+/// Para separar una etiqueta sin preguntar, tiene que ser **dueña** de al menos
+/// dos clusters de la auditoría: en cada uno, la mitad o más de sus espigas son
+/// de ella, y tiene ahí al menos esta fracción de las suyas (y no menos de
+/// `min_cluster_size` escalado). Es el espejo de las uniones: si una sesión
+/// empieza a mitad de la grabación, el arranque puede no reunir espigas de una
+/// unidad pequeña, la propagación las pega a la vecina y esa unidad nunca nace
+/// (en un encaje real, una del 8.8 % quedó dentro de la del 60 %; la regla
+/// laxa de «≥30 % en cada cluster» ni siquiera lo proponía, porque era el 13 %).
+pub const FRACCION_SEPARAR: f64 = 0.05;
+/// Auditorías seguidas con la misma separación antes de aplicarla.
+pub const SEPARAR_TRAS: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamsAgrupador {
@@ -112,6 +123,8 @@ pub struct ParamsAgrupador {
     /// Auditorías seguidas que tiene que repetirse una unión clara para
     /// aplicarse sola. 0 = nunca: sólo se propone.
     pub unir_tras: u32,
+    /// Lo mismo para las separaciones claras. 0 = nunca: sólo se propone.
+    pub separar_tras: u32,
 }
 
 impl Default for ParamsAgrupador {
@@ -130,6 +143,7 @@ impl Default for ParamsAgrupador {
             auditoria: AUDITORIA,
             auditoria_asincrona: true,
             unir_tras: UNIR_TRAS,
+            separar_tras: SEPARAR_TRAS,
         }
     }
 }
@@ -170,6 +184,9 @@ struct Auditoria {
     propuestas: Vec<Propuesta>,
     /// Uniones con evidencia fuerte (`FRACCION_UNIR`), candidatas a aplicarse.
     claras: Vec<(i64, i64)>,
+    /// Separaciones claras: por etiqueta, sus espigas de la muestra en los
+    /// clusters de los que es dueña, con el cluster de cada una.
+    separaciones: Vec<(i64, Vec<(Vec<f32>, i32)>)>,
 }
 
 fn dist2(a: &[f32], b: &[f32]) -> f32 {
@@ -230,7 +247,7 @@ fn audita(puntos: Vec<Vec<f32>>, etiquetas: Vec<i64>, p: ParamsAgrupador) -> Aud
     let radio = calcula_radio(&puntos, p.vecinos, p.percentil_radio);
     let mcs = ((p.min_cluster_size * puntos.len()) as f64 / p.ventana as f64).round().max(5.0) as usize;
     let Ok(cl) = hdbscan(&puntos, mcs, p.min_samples) else {
-        return Auditoria { radio, propuestas: Vec::new(), claras: Vec::new() };
+        return Auditoria { radio, propuestas: Vec::new(), claras: Vec::new(), separaciones: Vec::new() };
     };
     // total[e] y conjunta[(cluster, e)]
     let mut total: HashMap<i64, usize> = HashMap::new();
@@ -267,12 +284,44 @@ fn audita(puntos: Vec<Vec<f32>>, etiquetas: Vec<i64>, p: ParamsAgrupador) -> Aud
             }
         }
     }
+    let mut tam_cluster: HashMap<i32, usize> = HashMap::new();
+    for &c in cl.iter().filter(|&&c| c >= 0) {
+        *tam_cluster.entry(c).or_default() += 1;
+    }
+    let mut separaciones = Vec::new();
     for &e in &etiquetas_u {
+        if e < 0 {
+            continue;
+        }
         if clusters.iter().filter(|&&c| esta(c, e)).count() >= 2 {
             propuestas.push(Propuesta::Separar(e));
         }
+        // Dueña: la mitad o más del cluster es de `e`, y `e` tiene ahí una parte
+        // no despreciable de las suyas.
+        let te = total.get(&e).copied().unwrap_or(0);
+        let duenas: Vec<i32> = clusters
+            .iter()
+            .copied()
+            .filter(|&c| {
+                let k = conjunta.get(&(c, e)).copied().unwrap_or(0);
+                k >= mcs && k as f64 >= FRACCION_SEPARAR * te as f64 && 2 * k >= tam_cluster[&c]
+            })
+            .collect();
+        if duenas.len() >= 2 {
+            if !propuestas.contains(&Propuesta::Separar(e)) {
+                propuestas.push(Propuesta::Separar(e));
+            }
+            let muestra: Vec<(Vec<f32>, i32)> = puntos
+                .iter()
+                .zip(&etiquetas)
+                .zip(&cl)
+                .filter(|((_, et), c)| **et == e && duenas.contains(*c))
+                .map(|((x, _), &c)| (x.clone(), c))
+                .collect();
+            separaciones.push((e, muestra));
+        }
     }
-    Auditoria { radio, propuestas, claras }
+    Auditoria { radio, propuestas, claras, separaciones }
 }
 
 impl ParamsAgrupador {
@@ -303,6 +352,10 @@ pub struct Agrupador {
     persistencia: HashMap<(i64, i64), u32>,
     /// Uniones aplicadas: (etiqueta absorbida, etiqueta que queda).
     uniones: Vec<(i64, i64)>,
+    /// Auditorías seguidas en que cada separación clara se repitió.
+    persistencia_sep: HashMap<i64, u32>,
+    /// Separaciones aplicadas: (etiqueta original, etiquetas nuevas).
+    separaciones: Vec<(i64, Vec<i64>)>,
     /// Ruido en las últimas espigas: (era ruido) en orden.
     recientes: VecDeque<bool>,
     dim: Option<usize>,
@@ -331,6 +384,8 @@ impl Agrupador {
             propuestas: Vec::new(),
             persistencia: HashMap::new(),
             uniones: Vec::new(),
+            persistencia_sep: HashMap::new(),
+            separaciones: Vec::new(),
             recientes: VecDeque::new(),
             dim: None,
             p,
@@ -566,11 +621,12 @@ impl Agrupador {
             let n = anterior.get(&par).copied().unwrap_or(0) + 1;
             self.persistencia.insert(par, n);
         }
-        if self.p.unir_tras == 0 {
-            return;
-        }
-        let mut listas: Vec<(i64, i64)> =
-            self.persistencia.iter().filter(|&(_, &n)| n >= self.p.unir_tras).map(|(&par, _)| par).collect();
+        let unidas_antes = self.uniones.len();
+        let mut listas: Vec<(i64, i64)> = if self.p.unir_tras == 0 {
+            Vec::new()
+        } else {
+            self.persistencia.iter().filter(|&(_, &n)| n >= self.p.unir_tras).map(|(&par, _)| par).collect()
+        };
         listas.sort_unstable();
         for (a_, b_) in listas {
             let (ca, cb) = (self.conteo.get(&a_).copied().unwrap_or(0), self.conteo.get(&b_).copied().unwrap_or(0));
@@ -588,6 +644,67 @@ impl Agrupador {
             self.uniones.push((absorbida, queda));
             self.persistencia.retain(|&(x, y), _| x != absorbida && y != absorbida);
         }
+
+        // Separaciones claras, igual: a las `separar_tras` auditorías seguidas,
+        // las espigas de la etiqueta que caen en el cluster menor reciben un id
+        // nuevo (cada espiga de la ventana va con la espiga de la muestra más
+        // cercana). Una etiqueta que se acaba de unir no se separa en la misma
+        // ronda.
+        let tocadas: Vec<i64> = self.uniones[unidas_antes..].iter().flat_map(|&(a, b)| [a, b]).collect();
+        let anterior = std::mem::take(&mut self.persistencia_sep);
+        for (e, _) in &a.separaciones {
+            self.persistencia_sep.insert(*e, anterior.get(e).copied().unwrap_or(0) + 1);
+        }
+        if self.p.separar_tras == 0 {
+            return;
+        }
+        for (e, muestra) in a.separaciones {
+            if self.persistencia_sep.get(&e).copied().unwrap_or(0) < self.p.separar_tras
+                || tocadas.contains(&e)
+                || !self.conteo.contains_key(&e)
+            {
+                continue;
+            }
+            // El cluster con más espigas conserva el id; cada otro recibe uno nuevo.
+            let mut tam: HashMap<i32, usize> = HashMap::new();
+            for (_, c) in &muestra {
+                *tam.entry(*c).or_default() += 1;
+            }
+            let mayor = *tam.iter().max_by_key(|&(c, &k)| (k, -c)).unwrap().0;
+            let mut id_de: HashMap<i32, i64> = HashMap::new();
+            let mut nuevas = Vec::new();
+            let mut otros: Vec<i32> = tam.keys().copied().filter(|&c| c != mayor).collect();
+            otros.sort_unstable();
+            for c in otros {
+                id_de.insert(c, self.siguiente_id);
+                nuevas.push(self.siguiente_id);
+                self.siguiente_id += 1;
+            }
+            for (x, et) in self.ventana.iter_mut() {
+                if *et != e {
+                    continue;
+                }
+                let c = muestra
+                    .iter()
+                    .min_by(|a, b| dist2(x, &a.0).total_cmp(&dist2(x, &b.0)))
+                    .map(|m| m.1)
+                    .unwrap_or(mayor);
+                if let Some(&nuevo) = id_de.get(&c) {
+                    *et = nuevo;
+                }
+            }
+            self.conteo.clear();
+            for (_, et) in &self.ventana {
+                *self.conteo.entry(*et).or_default() += 1;
+            }
+            self.persistencia_sep.remove(&e);
+            self.separaciones.push((e, nuevas));
+        }
+    }
+
+    /// Separaciones aplicadas: (etiqueta original, etiquetas nuevas).
+    pub fn separaciones(&self) -> &[(i64, Vec<i64>)] {
+        &self.separaciones
     }
 
     /// Uniones aplicadas en la sesión: (etiqueta absorbida, etiqueta que queda).

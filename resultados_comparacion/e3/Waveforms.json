@@ -1,4 +1,76 @@
 {
+  "calidad": {
+    "en_linea": {
+      "contaminacion_medible": true,
+      "duracion_s": 1192.7131333333336,
+      "fraccion_espigas_buenas": 0.0,
+      "n_buenas": 0,
+      "segmentos": 150,
+      "tiempo_muerto_ms": 1.6333333333333335,
+      "unidades": [
+        {
+          "buena": false,
+          "contaminacion": 0.0,
+          "distancia_aislamiento": 8.551903857004463,
+          "espigas": 342,
+          "etiqueta": 0,
+          "fraccion_isi_cortos": 0.0,
+          "l_ratio": 0.32262030376764034,
+          "presencia": 0.9,
+          "silueta": 0.3808244654649728,
+          "snr": 6.470013068321288,
+          "tasa_hz": 0.28674120410177417,
+          "violaciones": 0
+        },
+        {
+          "buena": false,
+          "contaminacion": 1.0,
+          "distancia_aislamiento": 4.777859490350921,
+          "espigas": 862,
+          "etiqueta": 1,
+          "fraccion_isi_cortos": 0.011673151750972763,
+          "l_ratio": 0.7240506802137766,
+          "presencia": 0.7,
+          "silueta": -0.07942144570473061,
+          "snr": 4.7586857364845345,
+          "tasa_hz": 0.7227219822682144,
+          "violaciones": 9
+        },
+        {
+          "buena": false,
+          "contaminacion": 0.0,
+          "distancia_aislamiento": 5.449290841154136,
+          "espigas": 431,
+          "etiqueta": 2,
+          "fraccion_isi_cortos": 0.0,
+          "l_ratio": 0.6627515591426197,
+          "presencia": 0.7,
+          "silueta": 0.09570230351859131,
+          "snr": 6.065940814571398,
+          "tasa_hz": 0.3613609911341072,
+          "violaciones": 0
+        }
+      ]
+    },
+    "referencia_encaje": {
+      "contaminacion_medible": true,
+      "duracion_s": 1192.7131333333336,
+      "fraccion_espigas_buenas": 0.0,
+      "n_buenas": 0,
+      "segmentos": 150,
+      "tiempo_muerto_ms": 1.6333333333333335,
+      "unidades": []
+    },
+    "referencia_pca": {
+      "contaminacion_medible": true,
+      "duracion_s": 1192.7131333333336,
+      "fraccion_espigas_buenas": 0.0,
+      "n_buenas": 0,
+      "segmentos": 150,
+      "tiempo_muerto_ms": 1.6333333333333335,
+      "unidades": []
+    }
+  },
   "comparaciones": [
     {
       "ari_global": null,
@@ -12,9 +84,9 @@
       "divisiones": [],
       "fusiones": [],
       "referencia": "Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena)",
-      "ruido_en_linea": 0.05791505791505792,
+      "ruido_en_linea": 0.45097380792478176,
       "ruido_referencia": 1.0,
-      "unidades_en_linea": 2,
+      "unidades_en_linea": 3,
       "unidades_referencia": 0
     },
     {
@@ -29,14 +101,14 @@
       "divisiones": [],
       "fusiones": [],
       "referencia": "Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador)",
-      "ruido_en_linea": 0.05791505791505792,
+      "ruido_en_linea": 0.45097380792478176,
       "ruido_referencia": 1.0,
-      "unidades_en_linea": 2,
+      "unidades_en_linea": 3,
       "unidades_referencia": 0
     }
   ],
-  "espigas": 11914,
-  "ids_emitidos": 2,
-  "segundos_en_linea": 0.241947765,
+  "espigas": 2978,
+  "ids_emitidos": 3,
+  "segundos_en_linea": 0.040498539,
   "uniones": 0
 }

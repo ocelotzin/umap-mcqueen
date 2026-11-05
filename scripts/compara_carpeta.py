@@ -25,6 +25,13 @@ Deja en --salida (por defecto `resultados_comparacion/`):
   resumen.csv           una fila por archivo
 y muestra el resumen al final.
 
+Calidad sin verdad de campo: si junto a un archivo hay un `STime.csv` (el tiempo
+de cada espiga, en muestras, una fila por espiga y en el mismo orden), la sonda
+mide además, para cada método, cuántas unidades son buenas por sí mismas:
+violaciones del periodo refractario, contaminación, presencia, SNR y
+aislamiento (ver `src/calidad.rs`). Ningún método hace de juez.
+Opciones: --tiempos NOMBRE (por defecto STime.csv), --fs (30000), --refractario-ms (2).
+
 Qué CSV se toman: cualquier `*.csv` con al menos --min-columnas columnas (por
 defecto 8) y --min-filas filas (por defecto 1000). Así se saltan los encajes
 (2 columnas), los de etiquetas y los archivos pequeños. Sólo usa la biblioteca
@@ -112,6 +119,10 @@ def main():
     ap.add_argument("--min-filas", type=int, default=1000)
     ap.add_argument("--tramos", type=int, default=5)
     ap.add_argument("--lote", type=int, default=200)
+    ap.add_argument("--tiempos", default="STime.csv",
+                    help="nombre del archivo de tiempos junto a cada Waveforms (vacío para no usarlo)")
+    ap.add_argument("--fs", type=float, default=30000.0, help="frecuencia de muestreo de los tiempos (Hz)")
+    ap.add_argument("--refractario-ms", type=float, default=2.0)
     ap.add_argument("--raiz", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="raíz del repositorio umap-mcqueen")
     a = ap.parse_args()
@@ -123,6 +134,9 @@ def main():
     candidatos = sorted(p for p in carpeta.rglob("*.csv") if salida not in p.parents)
     archivos, saltados = [], []
     for p in candidatos:
+        if a.tiempos and p.name == a.tiempos:
+            saltados.append((p, "archivo de tiempos"))
+            continue
         cols, filas = columnas_y_filas(p, a.min_filas)
         if cols < a.min_columnas:
             saltados.append((p, f"{cols} columnas"))
@@ -157,6 +171,10 @@ def main():
         else:
             args += ["--entrenar", str(a.entrenar)]
             origen = f"entrena {a.entrenar}"
+        tiempos = p.with_name(a.tiempos) if a.tiempos else None
+        if tiempos and tiempos.exists():
+            args += ["--tiempos", str(tiempos), "--fs", str(a.fs), "--refractario-ms", str(a.refractario_ms)]
+            origen += " · con tiempos"
         print(f"[{i}/{len(archivos)}] {rel} ({origen})…", end=" ", flush=True)
         t0 = time.time()
         with open(log, "w") as f:
@@ -178,6 +196,12 @@ def main():
                 fila[f"fusiones_{clave}"] = len(c["fusiones"])
                 fila[f"divisiones_{clave}"] = len(c["divisiones"])
                 fila[f"ruido_ref_{clave}"] = c["ruido_referencia"]
+            for clave, c in (d.get("calidad") or {}).items():
+                fila[f"buenas_{clave}"] = c["n_buenas"]
+                fila[f"unidades_{clave}"] = len(c["unidades"])
+                fila[f"espigas_buenas_{clave}"] = c["fraccion_espigas_buenas"]
+                fila["tiempo_muerto_ms"] = c["tiempo_muerto_ms"]
+                fila["contaminacion_medible"] = c["contaminacion_medible"]
             fila["unidades_en_linea"] = d["comparaciones"][0]["unidades_en_linea"]
             fila["ruido_en_linea"] = d["comparaciones"][0]["ruido_en_linea"]
             print(f"ARI {fmt(fila['ari_pca'])} (PCA) · {fmt(fila['ari_encaje'])} (encaje) · {dt:.0f} s")
@@ -187,7 +211,11 @@ def main():
     campos = ["archivo", "origen", "espigas", "unidades_en_linea", "unidades_ref_pca", "unidades_ref_encaje",
               "ari_pca", "ari_pca_min_tramo", "ari_encaje", "ari_encaje_min_tramo",
               "fusiones_pca", "divisiones_pca", "fusiones_encaje", "divisiones_encaje",
-              "ruido_en_linea", "ruido_ref_pca", "ruido_ref_encaje", "ids", "uniones", "segundos", "error"]
+              "ruido_en_linea", "ruido_ref_pca", "ruido_ref_encaje",
+              "buenas_en_linea", "buenas_referencia_pca", "buenas_referencia_encaje",
+              "espigas_buenas_en_linea", "espigas_buenas_referencia_pca", "espigas_buenas_referencia_encaje",
+              "tiempo_muerto_ms", "contaminacion_medible",
+              "ids", "uniones", "segundos", "error"]
     with open(salida / "resumen.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=campos, extrasaction="ignore")
         w.writeheader()
@@ -223,6 +251,22 @@ def main():
                 print(f"   {f['archivo']}  (log: {(salida / f['archivo']).with_suffix('.log')})")
         else:
             print("Ningún archivo con ARI < 0.9, fusiones, divisiones o distinto número de unidades.")
+    con_cal = [f for f in ok if "buenas_en_linea" in f]
+    if con_cal:
+        print(f"\nCALIDAD sin verdad de campo ({len(con_cal)} archivos con tiempos): unidades buenas por método")
+        for clave, nombre in (("en_linea", "en línea"), ("referencia_pca", "PCA offline"),
+                              ("referencia_encaje", "HDBSCAN sobre el encaje")):
+            buenas = sum(f.get(f"buenas_{clave}", 0) for f in con_cal)
+            total = sum(f.get(f"unidades_{clave}", 0) for f in con_cal)
+            esp = [f[f"espigas_buenas_{clave}"] for f in con_cal if valido(f.get(f"espigas_buenas_{clave}"))]
+            med = f"{100 * statistics.median(esp):.1f} %" if esp else "—"
+            print(f"   {nombre:<26} {buenas:>5} buenas de {total:>5} unidades · "
+                  f"mediana de espigas en unidades buenas por archivo: {med}")
+        sin_ventana = [f for f in con_cal if f.get("contaminacion_medible") is False]
+        if sin_ventana:
+            print(f"   ({len(sin_ventana)} archivos sin ventana entre el tiempo muerto del detector y el "
+                  f"refractario: ahí no se calcula la contaminación de Hill, que es informativa; el "
+                  f"criterio de unidad buena usa la fracción de intervalos cortos.)")
     print("\nColumnas: unid = unidades en línea (≥0.5 %) · ref = unidades de la referencia PCA · "
           "mín = peor tramo de la sesión · fus/div = fusiones/divisiones contra PCA · ruido = en línea.")
     print("Recuerda: las referencias offline son otro método, no verdad de campo.")

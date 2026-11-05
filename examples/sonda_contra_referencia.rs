@@ -36,7 +36,11 @@
 //! --guardar-etiquetas archivo.csv (índice, en línea, referencia) ·
 //! --entrenar N (con --formas: entrena UMAP con las primeras N formas de onda
 //! del propio archivo, en vez de --puntos o --modelo) ·
-//! --resumen-json archivo.json (las medidas, para `scripts/compara_carpeta.py`).
+//! --resumen-json archivo.json (las medidas, para `scripts/compara_carpeta.py`) ·
+//! --tiempos STime.csv (tiempo de cada espiga, en muestras; activa la calidad
+//! sin verdad de campo: violaciones refractarias, contaminación, presencia,
+//! SNR, aislamiento; ver `umap_mcqueen::calidad`) · --fs Hz (30000) ·
+//! --refractario-ms (2).
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -46,6 +50,7 @@ use csv::ReaderBuilder;
 use cubecl::wgpu::WgpuRuntime;
 use hdbscan::{Hdbscan, HdbscanHyperParams, NnAlgorithm};
 use umap_mcqueen::agrupador::{Agrupador, ParamsAgrupador, ETIQUETA_RUIDO};
+use umap_mcqueen::calidad::{self, CalidadElectrodo, ParamsCalidad};
 use umap_mcqueen::normaliza::{Normalizador, NormalizadorDeEntrada};
 use umap_mcqueen::spikesim::GeneradorMezclaT;
 use umap_mcqueen::{configuracion, modelo};
@@ -411,6 +416,43 @@ fn informe(titulo: &str, en_linea: &[i64], referencia: &[i64], tramos: usize, es
     medidas
 }
 
+// ----------------------------------------------------------------- calidad
+
+fn f(x: f64, nd: usize) -> String {
+    if x.is_finite() { format!("{x:.nd$}") } else { "—".into() }
+}
+
+/// Calidad de las unidades de cada método, sin que ninguno sea la referencia.
+fn informe_calidad(calidades: &[(String, CalidadElectrodo)], p: &ParamsCalidad) {
+    let Some((_, primero)) = calidades.first() else { return };
+    println!("\n=== Calidad de las unidades (sin verdad de campo) ===");
+    println!("Sesión de {:.0} s en {} segmento(s) · tiempo muerto del detector {:.2} ms · refractario {} ms{}",
+             primero.duracion_s, primero.segmentos, primero.tiempo_muerto_ms, p.refractario_ms,
+             if primero.contaminacion_medible { String::new() } else {
+                 " · sin ventana entre tiempo muerto y refractario: la contaminación de Hill no se mide".into()
+             });
+    println!("Buena = intervalos < {} ms en menos del {} % · presencia ≥ {} · distancia de aislamiento ≥ {} (o L-ratio < {} si no se define)",
+             p.refractario_ms, 100.0 * p.umbral_isi_cortos, p.umbral_presencia, p.umbral_aislamiento, p.umbral_l_ratio);
+    println!("\n{:<18} {:>8} {:>7} {:>16}", "método", "unidades", "buenas", "espigas en buenas");
+    for (n, c) in calidades {
+        println!("{:<18} {:>8} {:>7} {:>15.1}%", n, c.unidades.len(), c.n_buenas, 100.0 * c.fraccion_espigas_buenas);
+    }
+    for (n, c) in calidades {
+        println!("\n{n}:");
+        println!("  {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>8} {:>6} {:>8} {:>8} {:>7}  {}",
+                 "unidad", "espigas", "Hz", "viol.", "ISI<r", "contam.", "presenc.", "SNR", "aislam.", "L-ratio", "silueta", "");
+        let mut us: Vec<_> = c.unidades.iter().collect();
+        us.sort_by(|a, b| b.espigas.cmp(&a.espigas));
+        for u in us {
+            println!("  {:>8} {:>8} {:>7} {:>6} {:>6}% {:>8} {:>8} {:>6} {:>8} {:>8} {:>7}  {}",
+                     u.etiqueta, u.espigas, f(u.tasa_hz, 1), u.violaciones, f(100.0 * u.fraccion_isi_cortos, 2),
+                     f(u.contaminacion, 3),
+                     f(u.presencia, 2), f(u.snr, 1), f(u.distancia_aislamiento, 1), f(u.l_ratio, 3),
+                     f(u.silueta, 2), if u.buena { "✓ buena" } else { "" });
+        }
+    }
+}
+
 // --------------------------------------------------------------------- main
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -423,6 +465,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tramos = num("--tramos", 5)?.max(1);
 
     // (encaje, referencias)
+    // Formas de onda crudas y sus 4 componentes principales, para la calidad.
+    let mut para_calidad: Option<(Vec<Vec<f64>>, Vec<Vec<f64>>)> = None;
     let (encaje, referencias): (Vec<Vec<f32>>, Vec<(String, Vec<i64>, bool)>) =
         if let Some(k) = opcion("--simular") {
             let k: usize = k.parse()?;
@@ -475,6 +519,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let ref_pca = referencia_hdbscan(&pcs, 500, 25)?;
             let ref_enc = referencia_hdbscan(&encaje, 500, 25)?;
             println!("Referencias offline calculadas en {:.1} s.", t0.elapsed().as_secs_f64());
+            let rasgos: Vec<Vec<f64>> = pca(&ajuste, &formas, 4)
+                .into_iter()
+                .map(|f| f.into_iter().map(|x| x as f64).collect())
+                .collect();
+            para_calidad = Some((formas, rasgos));
             (encaje, vec![
                 ("Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena)".to_string(), ref_pca, false),
                 ("Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador)".to_string(), ref_enc, false),
@@ -495,13 +544,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|(titulo, referencia, es_verdad)| informe(titulo, &en_linea, referencia, tramos, *es_verdad))
         .collect();
+    // Calidad sin verdad de campo: necesita los tiempos de cada espiga.
+    let mut calidades: Vec<(String, CalidadElectrodo)> = Vec::new();
+    if let (Some(ruta_t), Some((formas, rasgos))) = (opcion("--tiempos"), &para_calidad) {
+        let tiempos: Vec<f64> = lee_csv(&ruta_t)?.into_iter().map(|f| f.first().copied().unwrap_or(f64::NAN)).collect();
+        if tiempos.len() != formas.len() {
+            return Err(format!("{ruta_t} tiene {} filas y las formas {}: tienen que ser las mismas espigas",
+                               tiempos.len(), formas.len()).into());
+        }
+        let pc = ParamsCalidad {
+            fs: opcion("--fs").map(|s| s.parse()).transpose()?.unwrap_or(30_000.0),
+            refractario_ms: opcion("--refractario-ms").map(|s| s.parse()).transpose()?.unwrap_or(2.0),
+            ..Default::default()
+        };
+        let nombres = ["en_linea", "referencia_pca", "referencia_encaje"];
+        let etiquetados: Vec<&[i64]> = std::iter::once(en_linea.as_slice())
+            .chain(referencias.iter().map(|(_, r, _)| r.as_slice()))
+            .collect();
+        for (nombre, et) in nombres.iter().zip(etiquetados) {
+            calidades.push((nombre.to_string(), calidad::evalua(et, &tiempos, formas, rasgos, &pc)));
+        }
+        informe_calidad(&calidades, &pc);
+    }
+
     if let Some(ruta) = opcion("--resumen-json") {
+        let cal: serde_json::Map<String, serde_json::Value> = calidades
+            .iter()
+            .map(|(n, c)| (n.clone(), serde_json::to_value(c).unwrap_or(serde_json::Value::Null)))
+            .collect();
         let json = serde_json::json!({
             "espigas": en_linea.len(),
             "ids_emitidos": agr.n_ids_emitidos(),
             "uniones": agr.uniones().len(),
             "segundos_en_linea": segundos_en_linea,
             "comparaciones": medidas,
+            "calidad": cal,
         });
         std::fs::write(&ruta, serde_json::to_string_pretty(&json)?)?;
     }

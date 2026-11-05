@@ -8,6 +8,8 @@ use fast_umap::prelude::*;
 
 /// Guardado y carga **verificada** del modelo: pesos más manifiesto.
 pub mod agrupador;
+/// Calidad de unidades sin verdad de campo: refractario, aislamiento, presencia.
+pub mod calidad;
 pub mod identidades;
 pub mod modelo;
 /// Normalización con referencia fija, de la entrada y del encaje.

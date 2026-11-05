@@ -6,35 +6,57 @@ Entrenando UMAP con las primeras 2000 formas de onda (semilla 1).
 [fast-umap] Computing global k-NN graph (k=15) …
 [fast-umap] k-NN done in 0.21s — 30000 total edges, 30000 positive + 150000 negative edges per epoch (neg_rate=5)
 [fast-umap] Training started …
-[fast-umap] Training complete — 200 epochs in 00:00:24, best loss: 0.300189
-31586 espigas de 48 muestras.
-Referencias offline calculadas en 4.3 s.
-En línea: 31586 espigas en lotes de 200 en 1.5 s · 2 ids · uniones []
+[fast-umap] Training complete — 200 epochs in 00:00:22, best loss: 0.321802
+35105 espigas de 48 muestras.
+Referencias offline calculadas en 5.4 s.
+En línea: 35105 espigas en lotes de 200 en 1.7 s · 2 ids · uniones [(1, 0)]
 
 === Contra spike sorting OFFLINE: PCA (3) de las formas de onda + HDBSCAN (toda la cadena) ===
-ARI global (sin el ruido de la referencia): 0.930
-Ruido: en línea 2.5 % · referencia 15.9 %
-ARI por tramo de la sesión (5 tramos de 6318): 0.928 · 0.932 · 0.928 · 0.919 · 0.939
+ARI global (sin el ruido de la referencia): 0.787
+Ruido: en línea 1.7 % · referencia 41.2 %
+ARI por tramo de la sesión (5 tramos de 7021): 0.936 · 0.825 · 0.816 · 0.832 · 0.419
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-         1    18209   57.6%   → 0: 100 % · ruido: 0 % · 1: 0 %
-         2     7047   22.3%   → 1: 99 % · 0: 1 % · ruido: 0 %
-         0     1302    4.1%   → 1: 91 % · ruido: 8 % · 0: 1 %
-     ruido     5028   15.9%   → 0: 51 % · 1: 36 % · ruido: 12 %
+         0    19536   55.7%   → 0: 99 % · 1: 1 % · ruido: 0 %
+         1     1098    3.1%   → 1: 87 % · 0: 13 % · ruido: 0 %
+     ruido    14471   41.2%   → 0: 62 % · 1: 34 % · ruido: 4 %
 
-Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 1 ← [0, 2]
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
 Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
 
 === Contra HDBSCAN OFFLINE sobre el mismo encaje (sólo el agrupador) ===
-ARI global (sin el ruido de la referencia): 0.949
-Ruido: en línea 2.5 % · referencia 21.2 %
-ARI por tramo de la sesión (5 tramos de 6318): 0.950 · 0.957 · 0.941 · 0.942 · 0.952
+ARI global (sin el ruido de la referencia): 0.779
+Ruido: en línea 1.7 % · referencia 53.9 %
+ARI por tramo de la sesión (5 tramos de 7021): 0.921 · 0.847 · 0.839 · 0.845 · 0.366
 
 referencia  espigas       %   → en línea (fracción de sus espigas)
-         1    16708   52.9%   → 0: 100 % · ruido: 0 %
-         2     7273   23.0%   → 1: 99 % · 0: 1 % · ruido: 0 %
-         0      919    2.9%   → 1: 93 % · ruido: 7 %
-     ruido     6686   21.2%   → 0: 61 % · 1: 29 % · ruido: 11 %
+         0    13959   39.8%   → 0: 97 % · 1: 3 % · ruido: 0 %
+         1     2215    6.3%   → 1: 87 % · 0: 13 %
+     ruido    18931   53.9%   → 0: 76 % · 1: 20 % · ruido: 3 %
 
-Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): 1 ← [0, 2]
+Fusiones (dos de referencia con la mayoría de sus espigas en la misma unidad en línea): ninguna
 Divisiones (una de referencia repartida en dos en línea, ≥20 % cada una): ninguna
+
+=== Calidad de las unidades (sin verdad de campo) ===
+Sesión de 1335 s en 150 segmento(s) · tiempo muerto del detector 1.63 ms · refractario 2 ms
+Buena = intervalos < 2 ms en menos del 1 % · presencia ≥ 0.9 · distancia de aislamiento ≥ 20 (o L-ratio < 0.1 si no se define)
+
+método             unidades  buenas espigas en buenas
+en_linea                  2       0             0.0%
+referencia_pca            2       0             0.0%
+referencia_encaje         2       0             0.0%
+
+en_linea:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         0    28337    21.2   1666   5.91%    1.000     1.00    4.1        —    0.012    0.46  
+         1     6166     4.6     25   0.41%    1.000     0.83   15.0     13.6    0.140    0.56  
+
+referencia_pca:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         0    19536    14.6    458   2.36%    1.000     1.00    5.0        —    0.022    0.65  
+         1     1098     0.8      0   0.00%    0.000     1.00   26.3     11.0    0.124    0.82  
+
+referencia_encaje:
+    unidad  espigas      Hz  viol.   ISI<r  contam. presenc.    SNR  aislam.  L-ratio silueta  
+         0    13959    10.5    263   1.90%    1.000     1.00    5.7     21.4    0.163    0.63  
+         1     2215     1.7      0   0.00%    0.000     1.00   23.0     13.3    0.154    0.74  
