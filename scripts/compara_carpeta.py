@@ -18,7 +18,7 @@ Uso (desde la raíz de umap-mcqueen):
   python3 scripts/compara_carpeta.py datos/ --modelo modelos/s1
   python3 scripts/compara_carpeta.py datos/ --usar-encajes
   python3 scripts/compara_carpeta.py datos/ --salida resultados/ --entrenar 3000
-  python3 scripts/compara_carpeta.py datos/ --paralelo 8      # 8 electrodos a la vez
+  python3 scripts/compara_carpeta.py datos/ --paralelo 4      # 4 electrodos a la vez
 
 Deja en --salida (por defecto `resultados_comparacion/`):
   <ruta del csv>.log    la salida completa de la sonda
@@ -37,6 +37,16 @@ Parámetros del agrupador en línea (para probar políticas con las espigas
 dudosas): --voto-minimo (0.7), --percentil-radio (0.99), --factor-nacer (2.0).
 Por ejemplo, más exigente:
   python3 scripts/compara_carpeta.py datos/ --voto-minimo 0.9 --percentil-radio 0.95 --salida res_exigente/
+
+Varios electrodos a la vez: --paralelo N (por defecto 1, uno tras otro).
+Cada electrodo es un proceso aparte y los resultados son los mismos que en
+serie. Las partes paralelas de cada proceso (el HDBSCAN de la referencia) se
+reparten los núcleos: --hilos N fija cuántos usa cada uno (por defecto,
+núcleos / --paralelo). Si cada archivo entrena su UMAP (modo por defecto),
+todos los que van a la vez comparten la GPU: si aparecen errores de memoria en
+los .log, baja --paralelo. Para elegir N, empieza con 4 y súbelo mientras ni la
+CPU (htop) ni la GPU (nvidia-smi) se saturen. Ctrl+C detiene también los
+electrodos en curso.
 
 Qué CSV se toman: cualquier `*.csv` con al menos --min-columnas columnas (por
 defecto 8) y --min-filas filas (por defecto 1000). Así se saltan los encajes
@@ -139,12 +149,16 @@ def main():
     ap.add_argument("--percentil-radio", type=float,
                     help="agrupador: percentil de distancia a partir del cual una espiga es ruido (0.99)")
     ap.add_argument("--factor-nacer", type=float, help="agrupador: distancia para que nazca una unidad (2.0)")
-    ap.add_argument("--paralelo", type=int, default=max(1, (os.cpu_count() or 2) // 2),
-                    help="electrodos a la vez (por defecto, la mitad de los núcleos)")
+    ap.add_argument("--paralelo", type=int, default=1,
+                    help="electrodos a la vez (por defecto 1: uno tras otro); ver la sección de arriba")
     ap.add_argument("--hilos", type=int, default=0,
                     help="hilos por electrodo para las partes paralelas (0 = núcleos / --paralelo)")
     ap.add_argument("--raiz", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="raíz del repositorio umap-mcqueen")
+    # Sin argumentos: la documentación completa en lugar de un error.
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(0)
     a = ap.parse_args()
 
     carpeta = a.carpeta.resolve()
