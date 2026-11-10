@@ -7,9 +7,12 @@ agrupador en línea con dos referencias offline (PCA de las formas de onda +
 HDBSCAN, y HDBSCAN sobre el encaje). Nada se guarda a mano: el encaje sale de
 
   1. --modelo BASE           un modelo ya entrenado, el mismo para todos; o
-  2. --usar-encajes          un `encaje.csv` (o `<nombre>_encaje.csv`) junto al
+  2. --entrenar-con CSV      entrena UNA vez UMAP con las primeras --entrenar N
+                             formas de onda de ese archivo, lo guarda y lo usa
+                             para todos (necesita GPU solo para ese entrenamiento); o
+  3. --usar-encajes          un `encaje.csv` (o `<nombre>_encaje.csv`) junto al
                              archivo, si existe (no necesita GPU); o
-  3. por defecto             entrena UMAP con las primeras --entrenar N formas de
+  4. por defecto             entrena UMAP con las primeras --entrenar N formas de
                              onda de cada archivo (necesita GPU).
 
 Uso (desde la raíz de umap-mcqueen):
@@ -18,6 +21,7 @@ Uso (desde la raíz de umap-mcqueen):
   python3 scripts/compara_carpeta.py datos/ --modelo modelos/s1
   python3 scripts/compara_carpeta.py datos/ --usar-encajes
   python3 scripts/compara_carpeta.py datos/ --salida resultados/ --entrenar 3000
+  python3 scripts/compara_carpeta.py datos/ --entrenar-con datos/RR032/VPCd/e1/Waveforms.csv
   python3 scripts/compara_carpeta.py datos/ --paralelo 4      # 4 electrodos a la vez
 
 Deja en --salida (por defecto `resultados_comparacion/`):
@@ -48,6 +52,18 @@ los .log, baja --paralelo. Para elegir N, empieza con 4 y súbelo mientras ni la
 CPU (htop) ni la GPU (nvidia-smi) se saturen. Ctrl+C detiene también los
 electrodos en curso.
 
+Un solo encaje para todos (--entrenar-con CSV): el modelo se entrena con la CLI
+de umap-mcqueen (la misma que `cargo run --release -- CSV --modelo BASE`), con las
+primeras --entrenar N formas de onda del archivo y la semilla --semilla (9999
+por defecto, la de la CLI), y se guarda en <salida>/modelo_comun/ con su
+manifiesto; el log del entrenamiento queda en <salida>/entrenamiento.log. Luego
+cada electrodo se proyecta con ESE modelo, como con --modelo: todos los
+electrodos comparten encaje y normalización (la del archivo de entrenamiento),
+así que un electrodo con amplitudes muy distintas puede caer en parte fuera del
+rango del entrenamiento. Se saltan los archivos cuyo número de muestras por
+forma de onda no coincide con el del archivo de entrenamiento. El archivo de
+entrenamiento también se analiza si está dentro de la carpeta.
+
 Qué CSV se toman: cualquier `*.csv` con al menos --min-columnas columnas (por
 defecto 8) y --min-filas filas (por defecto 1000). Así se saltan los encajes
 (2 columnas), los de etiquetas y los archivos pequeños. Sólo usa la biblioteca
@@ -67,6 +83,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 EJEMPLO = "sonda_contra_referencia"
+CLI = "umap-mcqueen"
 
 
 def columnas_y_filas(ruta, min_filas):
@@ -101,17 +118,41 @@ def encaje_vecino(ruta):
     return None
 
 
-def compila(raiz):
-    print(f"Compilando el ejemplo {EJEMPLO} (release)…", flush=True)
-    r = subprocess.run(["cargo", "build", "--release", "--example", EJEMPLO], cwd=raiz)
+def compila(raiz, con_cli=False):
+    """Compila la sonda (y la CLI, si hace falta entrenar) y devuelve sus rutas."""
+    que = f"el ejemplo {EJEMPLO}" + (" y la CLI umap-mcqueen" if con_cli else "")
+    print(f"Compilando {que} (release)…", flush=True)
+    orden = ["cargo", "build", "--release", "--example", EJEMPLO] + (["--bin", CLI] if con_cli else [])
+    r = subprocess.run(orden, cwd=raiz)
     if r.returncode != 0:
-        sys.exit("No compiló el ejemplo; revisa la salida de cargo.")
+        sys.exit("No compiló; revisa la salida de cargo.")
     # Respeta CARGO_TARGET_DIR si está definido (cargo compila ahí, no en target/).
     destino = Path(os.environ["CARGO_TARGET_DIR"]) if os.environ.get("CARGO_TARGET_DIR") else raiz / "target"
-    bin_ = destino / "release" / "examples" / EJEMPLO
-    if not bin_.exists():
-        bin_ = bin_.with_suffix(".exe")
-    return bin_
+
+    def ejecutable(ruta):
+        return ruta if ruta.exists() else ruta.with_suffix(".exe")
+
+    return ejecutable(destino / "release" / "examples" / EJEMPLO), ejecutable(destino / "release" / CLI)
+
+
+def entrena_modelo_comun(cli, archivo, n, semilla, salida, raiz):
+    """Entrena UMAP una vez con la CLI y devuelve la ruta base del modelo."""
+    base = salida / "modelo_comun" / archivo.stem
+    base.parent.mkdir(parents=True, exist_ok=True)
+    log = salida / "entrenamiento.log"
+    print(f"Entrenando el modelo común con las primeras {n} formas de onda de {archivo} "
+          f"(semilla {semilla})… log: {log}", flush=True)
+    t0 = time.time()
+    with open(log, "w") as f:
+        r = subprocess.run([str(cli), str(archivo), "--modelo", str(base), "--train", str(n),
+                            "--semilla", str(semilla)],
+                           stdout=f, stderr=subprocess.STDOUT, cwd=raiz)
+    faltan = [x for x in (base.with_suffix(".bin"), base.with_suffix(".json")) if not x.exists()]
+    if r.returncode != 0 or faltan:
+        ultima = log.read_text(errors="replace").strip().splitlines()[-1:] or ["?"]
+        sys.exit(f"No se pudo entrenar el modelo común ({ultima[0][:200]}). Revisa {log}.")
+    print(f"Modelo común guardado en {base}.bin/.json ({time.time() - t0:.0f} s).", flush=True)
+    return base
 
 
 def valido(x):
@@ -134,6 +175,10 @@ def main():
     ap.add_argument("--modelo", help="ruta base de un modelo entrenado, para todos los archivos")
     ap.add_argument("--usar-encajes", action="store_true",
                     help="usar encaje.csv / <nombre>_encaje.csv junto a cada archivo si existe")
+    ap.add_argument("--entrenar-con", type=Path,
+                    help="CSV de formas de onda con el que se entrena UNA vez el modelo para todos")
+    ap.add_argument("--semilla", type=int, default=9999,
+                    help="semilla del entrenamiento con --entrenar-con (por defecto 9999, la de la CLI)")
     ap.add_argument("--entrenar", type=int, default=2000,
                     help="formas de onda para entrenar UMAP por archivo (si no hay modelo ni encaje)")
     ap.add_argument("--min-columnas", type=int, default=8)
@@ -165,6 +210,19 @@ def main():
     salida = a.salida.resolve()
     salida.mkdir(parents=True, exist_ok=True)
 
+    cols_modelo = None
+    if a.entrenar_con:
+        if a.modelo or a.usar_encajes:
+            sys.exit("--entrenar-con no se combina con --modelo ni con --usar-encajes: elige una fuente de encaje.")
+        a.entrenar_con = a.entrenar_con.resolve()
+        if not a.entrenar_con.exists():
+            sys.exit(f"No existe {a.entrenar_con}.")
+        cols_modelo, filas_ent = columnas_y_filas(a.entrenar_con, a.entrenar)
+        if filas_ent < a.entrenar:
+            sys.exit(f"{a.entrenar_con} tiene {filas_ent} filas y --entrenar pide {a.entrenar}.")
+        if not es_numerica(a.entrenar_con):
+            sys.exit(f"{a.entrenar_con} no es numérico (¿tiene cabecera?).")
+
     candidatos = sorted(p for p in carpeta.rglob("*.csv") if salida not in p.parents)
     archivos, saltados = [], []
     for p in candidatos:
@@ -178,6 +236,8 @@ def main():
             saltados.append((p, f"{filas} filas"))
         elif not es_numerica(p):
             saltados.append((p, "no es numérico (¿cabecera?)"))
+        elif cols_modelo is not None and cols != cols_modelo:
+            saltados.append((p, f"{cols} muestras por forma de onda; el modelo común espera {cols_modelo}"))
         else:
             archivos.append(p)
     print(f"{len(archivos)} archivos de formas de onda en {carpeta} · {len(saltados)} CSV saltados")
@@ -186,7 +246,9 @@ def main():
     if not archivos:
         sys.exit("No hay nada que comparar.")
 
-    binario = compila(a.raiz)
+    binario, cli = compila(a.raiz, con_cli=bool(a.entrenar_con))
+    if a.entrenar_con:
+        a.modelo = str(entrena_modelo_comun(cli, a.entrenar_con, a.entrenar, a.semilla, salida, a.raiz))
     # Varios electrodos a la vez: cada uno es un proceso aparte. Las partes
     # paralelas de cada proceso (HDBSCAN de la referencia) se reparten los
     # núcleos para no pelearse por ellos. Si cada archivo entrena UMAP en la
@@ -209,7 +271,7 @@ def main():
         vecino = encaje_vecino(p) if a.usar_encajes else None
         if a.modelo:
             args += ["--modelo", a.modelo]
-            origen = "modelo"
+            origen = "modelo común" if a.entrenar_con else "modelo"
         elif vecino:
             args += ["--puntos", str(vecino)]
             origen = f"encaje: {vecino.name}"
@@ -308,6 +370,9 @@ def main():
     ok = [f for f in filas if not f["error"]]
     print("\n" + "=" * 100)
     print(f"RESUMEN · {len(ok)} de {len(filas)} archivos comparados · detalle en {salida / 'resumen.csv'}")
+    if a.entrenar_con:
+        print(f"Modelo común: entrenado con las primeras {a.entrenar} formas de onda de {a.entrenar_con} "
+              f"(semilla {a.semilla}) → {a.modelo}")
     print("=" * 100)
     cab = f"{'archivo':<40} {'espigas':>8} {'unid':>5} {'ref':>4} {'ARI PCA':>8} {'mín':>6} {'ARI enc':>8} {'fus':>4} {'div':>4} {'ruido':>6}"
     print(cab)
