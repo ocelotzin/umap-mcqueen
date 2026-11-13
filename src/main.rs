@@ -70,6 +70,7 @@ struct Opciones {
     nsim: usize,
     sim_seed: u64,
     semilla: u64, // Semilla de todos los generadores del entrenamiento
+    etiquetas: Option<String>, // CSV donde escribir una etiqueta por forma de onda
 }
 
 const USO: &str = "\
@@ -85,6 +86,13 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --simular <n>             simular con n clusters
   --vectores-sim <n>        vectores simulados por --simular
   --semilla-sim <n>         semilla para simulación (por defecto aleatoria)
+  --etiquetas <ruta>        escribe en <ruta> la etiqueta de cada forma de onda, una por
+                            línea y en el mismo orden que el CSV (−1 = ruido), para
+                            compararla con otras etiquetas (p. ej. una verdad de campo con
+                            scripts/compara_etiquetas.py). Con esta opción se etiquetan
+                            TODAS las formas de onda: también las de entrenamiento y las
+                            del último lote incompleto, y la auditoría del agrupador corre
+                            en este mismo hilo (resultado reproducible)
 ";
 
 //Argumentos de ejecución, regresa una variable tipo opciones y comprueba que
@@ -102,6 +110,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         nsim : NVEC_SIM,
         sim_seed : rng.gen_range(33333..=9999999),
         semilla: DEFAULT_SEED,
+        etiquetas: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -113,6 +122,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--simular" => o.sim = args.next().ok_or("--simular necesita un número natural")?.parse()?,
             "--vectores-sim" => o.nsim = args.next().ok_or("--vectores-simulados necesita un número natural")?.parse()?,
             "--semilla-sim" => o.sim_seed = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
+            "--etiquetas" => o.etiquetas = Some(args.next().ok_or("--etiquetas necesita una ruta")?),
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -163,7 +173,16 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     //Cada forma de onda toma la etiqueta de sus vecinas recientes en el encaje
     //(propagación por vecindad): lo mismo que usa tdc_umap (ver
     //src/agrupador.rs).
-    let mut etiquetador = Agrupador::default();
+    //Al escribir etiquetas, la auditoría corre en este hilo: al leer un archivo las
+    //espigas llegan más rápido que una auditoría en segundo plano, y así el
+    //resultado no depende de la velocidad de la máquina.
+    let mut etiquetador = if opts.etiquetas.is_some() {
+        Agrupador::new(umap_mcqueen::agrupador::ParamsAgrupador { auditoria_asincrona: false, ..Default::default() })?
+    } else {
+        Agrupador::default()
+    };
+    //Etiqueta de cada forma de onda, en orden (sólo con --etiquetas).
+    let mut todas_las_etiquetas: Vec<i64> = Vec::new();
     //Formas de onda por etiqueta en toda la sesión.
     let mut conteo_total: BTreeMap<i64, usize> = BTreeMap::new();
     //Formas de onda por etiqueta en cada lote, para el raster de la sesión.
@@ -292,7 +311,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         (m, norm, norm_entrada)
     };
 
-    buffer_crudo.clear();
+    //Las formas de onda de entrenamiento se guardan: con --etiquetas también se etiquetan.
+    let entrenamiento = std::mem::take(&mut buffer_crudo);
 
     let mut total_puntos: Vec<(f32, f32)> = Vec::new();
     //Procesa un lote: encaje, normalización, agrupador y gráfica.
@@ -324,7 +344,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("El agrupador rechazó el lote {i}: {e}");
-                return;
+                //Ruido, para que el archivo de etiquetas siga alineado con el CSV.
+                return vec![umap_mcqueen::agrupador::ETIQUETA_RUIDO; lote.len()];
             }
         };
         let mut conteo_lote: BTreeMap<i64, usize> = BTreeMap::new();
@@ -360,9 +381,20 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         derecha.extend(vista::formas_de_onda(lote, &etiquetas, ANCHO_FORMAS_PX, ALTO_FORMAS_PX));
         println!("--- Embedding, raster y formas de onda en el índice {} ---", i);
         print!("{}", vista::lado_a_lado(&encaje, &derecha, 3));
+        etiquetas
     };
 
     println!("Lotes:");
+
+    //Con --etiquetas, las formas de onda de entrenamiento se etiquetan primero (son
+    //las primeras del CSV). En simulación no: ahí el entrenamiento es aparte.
+    if opts.etiquetas.is_some() && !opts.csv.is_empty() {
+        for (k, trozo) in entrenamiento.chunks(opts.batch_size).enumerate() {
+            let i = (k * opts.batch_size + trozo.len()).saturating_sub(1);
+            let e = procesa_lote(trozo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+            todas_las_etiquetas.extend(e);
+        }
+    }
 
     let mut ultimo = 0usize;
     for (i, result) in records { // si hay archivo, seguimos
@@ -371,7 +403,8 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         ultimo = i;
 
         if buffer_crudo.len() == opts.batch_size {
-            procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+            let e = procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+            todas_las_etiquetas.extend(e);
             buffer_crudo.clear();
         }
     }
@@ -382,16 +415,29 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             buffer_crudo.push(vector_generado.to_vec());
 
             if buffer_crudo.len() == opts.batch_size {
-                procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+                let e = procesa_lote(&buffer_crudo, i, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+                todas_las_etiquetas.extend(e);
                 buffer_crudo.clear();
             }
         }
     }
 
     // Procesa el último buffer, aunque tenga pocos vectores (poco recomendado)
-    if !buffer_crudo.is_empty() && INCOMPLETE_BUFF {
+    //Con --etiquetas también: cada forma de onda tiene que tener su etiqueta.
+    if !buffer_crudo.is_empty() && (INCOMPLETE_BUFF || opts.etiquetas.is_some()) {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
-        procesa_lote(&buffer_crudo, ultimo, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+        let e = procesa_lote(&buffer_crudo, ultimo, &mut etiquetador, &mut total_puntos, &mut conteo_total, &mut historial, &mut resumen_formas);
+        todas_las_etiquetas.extend(e);
+    }
+
+    if let Some(ruta) = &opts.etiquetas {
+        let mut texto = String::with_capacity(todas_las_etiquetas.len() * 3);
+        for e in &todas_las_etiquetas {
+            texto.push_str(&e.to_string());
+            texto.push('\n');
+        }
+        std::fs::write(ruta, texto)?;
+        println!("\nEtiquetas: {} formas de onda, una por línea y en el orden del CSV, en {}", todas_las_etiquetas.len(), ruta);
     }
 
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
