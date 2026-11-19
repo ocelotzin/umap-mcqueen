@@ -100,6 +100,7 @@ impl PyClasificador {
         auditoria_asincrona=true,
         unir_tras=agrupador::UNIR_TRAS,
         separar_tras=agrupador::SEPARAR_TRAS,
+        separacion_gmm=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -119,10 +120,12 @@ impl PyClasificador {
         auditoria_asincrona: bool,
         unir_tras: u32,
         separar_tras: u32,
+        separacion_gmm: bool,
     ) -> PyResult<Self> {
         let params = agrupador::ParamsAgrupador {
             ventana, vecinos, voto_minimo, arranque, min_cluster_arranque, min_cluster_size, min_samples,
             percentil_radio, factor_nacer, bufer, auditoria, auditoria_asincrona, unir_tras, separar_tras,
+            separacion: separacion_gmm.then(Default::default),
         };
         params.valida().map_err(PyValueError::new_err)?;
         let motor = Motor::carga(base, n_dim, params).map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -27,9 +27,15 @@
 //! **Auditoría.** Cada `auditoria` espigas, en otro hilo, HDBSCAN corre sobre
 //! una muestra de la ventana y se compara con las etiquetas: si un cluster
 //! reúne buena parte de dos etiquetas, se **propone** unirlas; si una etiqueta
-//! cae repartida en dos clusters, se propone separarla. **Sólo propone, nunca
-//! reetiqueta**: reescribir en bloque es lo que rompía la continuidad. La misma
-//! auditoría recalcula el `radio`.
+//! cae repartida en dos clusters, se propone separarla. Una propuesta aislada
+//! **no reetiqueta**: reescribir en bloque en cada reajuste es lo que rompía la
+//! continuidad. Sólo cuando la misma unión se repite en `unir_tras` auditorías
+//! seguidas (o la misma separación en `separar_tras`) se aplica, una sola vez,
+//! sobre las etiquetas de la ventana: en una unión la etiqueta con menos
+//! espigas pasa a la otra; en una separación el cluster mayor conserva el id y
+//! los demás reciben ids nuevos. Cada cambio aplicado queda en `uniones` o
+//! `separaciones`; con `unir_tras`/`separar_tras` en 0 nunca se aplican. La
+//! misma auditoría recalcula el `radio`.
 //!
 //! Medido en un encaje real de 94 208 espigas (prototipo): el cambio de
 //! etiqueta de un lote al siguiente sobre una sonda fija nunca pasó de 1.5 %
@@ -41,6 +47,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use hdbscan::{Hdbscan, HdbscanHyperParams, NnAlgorithm};
+
+use crate::mezcla::{ajusta_modelo, Modelo, ParamsSeparacion};
 
 /// Etiqueta de una espiga sin unidad. Coincide con `LABEL_TRASH` de tridesclous.
 pub const ETIQUETA_RUIDO: i64 = -1;
@@ -125,6 +133,11 @@ pub struct ParamsAgrupador {
     pub unir_tras: u32,
     /// Lo mismo para las separaciones claras. 0 = nunca: sólo se propone.
     pub separar_tras: u32,
+    /// Separación local con mezcla de gaussianas sobre las formas de onda de
+    /// cada unidad (ver `mezcla`). Sólo actúa si las espigas llegan con su forma
+    /// de onda (`etiqueta_con_formas`); si no, o con `None`, la auditoría separa
+    /// con HDBSCAN sobre el encaje como antes.
+    pub separacion: Option<ParamsSeparacion>,
 }
 
 impl Default for ParamsAgrupador {
@@ -144,6 +157,7 @@ impl Default for ParamsAgrupador {
             auditoria_asincrona: true,
             unir_tras: UNIR_TRAS,
             separar_tras: SEPARAR_TRAS,
+            separacion: Some(ParamsSeparacion::default()),
         }
     }
 }
@@ -184,9 +198,47 @@ struct Auditoria {
     propuestas: Vec<Propuesta>,
     /// Uniones con evidencia fuerte (`FRACCION_UNIR`), candidatas a aplicarse.
     claras: Vec<(i64, i64)>,
-    /// Separaciones claras: por etiqueta, sus espigas de la muestra en los
-    /// clusters de los que es dueña, con el cluster de cada una.
-    separaciones: Vec<(i64, Vec<(Vec<f32>, i32)>)>,
+    /// Separaciones claras: por etiqueta, sus espigas de la auditoría con el
+    /// subgrupo de cada una.
+    separaciones: Vec<(i64, Vec<Miembro>)>,
+    /// Segundo nivel: por grupo, la mezcla ajustada a sus formas de onda y el
+    /// subgrupo de cada espiga (por instante de llegada), o `None` si la mezcla
+    /// ve una sola neurona.
+    modelos: Vec<(i64, Option<(Modelo, Vec<(u64, usize)>)>)>,
+}
+
+/// Segundo nivel de un grupo: la mezcla que reparte sus espigas entre
+/// subunidades, y el id que se emite para cada subgrupo.
+struct ModeloGrupo {
+    modelo: Modelo,
+    ids: Vec<i64>,
+}
+
+/// Una espiga que la auditoría asignó a un subgrupo al proponer una separación.
+struct Miembro {
+    x: Vec<f32>,
+    forma: Option<Vec<f32>>,
+    t: u64,
+    c: i32,
+}
+
+/// Una espiga guardada: su punto en el encaje, su forma de onda (si llegó con
+/// ella), su instante de llegada (orden en el flujo) y la unidad que se emitió
+/// para ella (su grupo, o la subunidad si el grupo tiene segundo nivel).
+#[derive(Clone)]
+struct Espiga {
+    x: Vec<f32>,
+    forma: Option<Vec<f32>>,
+    t: u64,
+    unidad: i64,
+}
+
+/// Lo que la auditoría necesita de la ventana para separar con la mezcla:
+/// (etiqueta, espiga) de todas las espigas con forma de onda, y el tramo de
+/// tiempo que cubre la ventana.
+struct Locales {
+    espigas: Vec<(i64, Espiga)>,
+    tramo: (u64, u64),
 }
 
 fn dist2(a: &[f32], b: &[f32]) -> f32 {
@@ -243,11 +295,11 @@ fn hdbscan(datos: &[Vec<f32>], mcs: usize, ms: usize) -> Result<Vec<i32>, String
 }
 
 /// Compara HDBSCAN sobre una muestra de la ventana con sus etiquetas.
-fn audita(puntos: Vec<Vec<f32>>, etiquetas: Vec<i64>, p: ParamsAgrupador) -> Auditoria {
+fn audita(puntos: Vec<Vec<f32>>, tiempos: Vec<u64>, etiquetas: Vec<i64>, p: ParamsAgrupador, locales: Option<Locales>) -> Auditoria {
     let radio = calcula_radio(&puntos, p.vecinos, p.percentil_radio);
     let mcs = ((p.min_cluster_size * puntos.len()) as f64 / p.ventana as f64).round().max(5.0) as usize;
     let Ok(cl) = hdbscan(&puntos, mcs, p.min_samples) else {
-        return Auditoria { radio, propuestas: Vec::new(), claras: Vec::new(), separaciones: Vec::new() };
+        return Auditoria { radio, propuestas: Vec::new(), claras: Vec::new(), separaciones: Vec::new(), modelos: Vec::new() };
     };
     // total[e] y conjunta[(cluster, e)]
     let mut total: HashMap<i64, usize> = HashMap::new();
@@ -289,8 +341,10 @@ fn audita(puntos: Vec<Vec<f32>>, etiquetas: Vec<i64>, p: ParamsAgrupador) -> Aud
         *tam_cluster.entry(c).or_default() += 1;
     }
     let mut separaciones = Vec::new();
+    // Con formas de onda, las separaciones las decide la mezcla (abajo).
+    let hdbscan_separa = locales.is_none() || p.separacion.is_none();
     for &e in &etiquetas_u {
-        if e < 0 {
+        if e < 0 || !hdbscan_separa {
             continue;
         }
         if clusters.iter().filter(|&&c| esta(c, e)).count() >= 2 {
@@ -311,17 +365,39 @@ fn audita(puntos: Vec<Vec<f32>>, etiquetas: Vec<i64>, p: ParamsAgrupador) -> Aud
             if !propuestas.contains(&Propuesta::Separar(e)) {
                 propuestas.push(Propuesta::Separar(e));
             }
-            let muestra: Vec<(Vec<f32>, i32)> = puntos
+            let muestra: Vec<Miembro> = puntos
                 .iter()
+                .zip(&tiempos)
                 .zip(&etiquetas)
                 .zip(&cl)
-                .filter(|((_, et), c)| **et == e && duenas.contains(*c))
-                .map(|((x, _), &c)| (x.clone(), c))
+                .filter(|(((_, _), et), c)| **et == e && duenas.contains(*c))
+                .map(|(((x, &t), _), &c)| Miembro { x: x.clone(), forma: None, t, c })
                 .collect();
             separaciones.push((e, muestra));
         }
     }
-    Auditoria { radio, propuestas, claras, separaciones }
+    let mut modelos = Vec::new();
+    if let (Some(loc), Some(ps)) = (locales, p.separacion.as_ref()) {
+        let mut por_etiqueta: HashMap<i64, Vec<Espiga>> = HashMap::new();
+        for (e, esp) in loc.espigas {
+            if e >= 0 {
+                por_etiqueta.entry(e).or_default().push(esp);
+            }
+        }
+        let mut claves: Vec<i64> = por_etiqueta.keys().copied().collect();
+        claves.sort_unstable();
+        for e in claves {
+            let esp = &por_etiqueta[&e];
+            let formas: Vec<&[f32]> = esp.iter().map(|s| s.forma.as_deref().unwrap_or(&[])).collect();
+            let t: Vec<u64> = esp.iter().map(|s| s.t).collect();
+            let res = ajusta_modelo(&formas, &t, loc.tramo, ps).map(|(m, sub)| (m, t.iter().copied().zip(sub).collect()));
+            if res.is_some() {
+                propuestas.push(Propuesta::Separar(e));
+            }
+            modelos.push((e, res));
+        }
+    }
+    Auditoria { radio, propuestas, claras, separaciones, modelos }
 }
 
 impl ParamsAgrupador {
@@ -334,13 +410,21 @@ impl ParamsAgrupador {
 pub struct Agrupador {
     p: ParamsAgrupador,
     /// Espigas con etiqueta (las que votan).
-    ventana: VecDeque<(Vec<f32>, i64)>,
+    ventana: VecDeque<(Espiga, i64)>,
     /// Espigas por etiqueta dentro de la ventana.
     conteo: HashMap<i64, usize>,
     /// Espigas sin unidad, para nacimientos.
-    bufer: VecDeque<Vec<f32>>,
+    bufer: VecDeque<Espiga>,
     /// Arranque: espigas antes del primer agrupamiento.
-    inicio: Vec<Vec<f32>>,
+    inicio: Vec<Espiga>,
+    /// Espigas recibidas: el instante de llegada de la siguiente.
+    llegadas: u64,
+    /// Segundo nivel de los grupos que lo tienen.
+    modelos: HashMap<i64, ModeloGrupo>,
+    /// Cambios de segundo nivel pendientes: por grupo, el sentido del cambio
+    /// (2 = partir o cambiar el número de subunidades, 1 = volver a una sola
+    /// unidad) y en cuántas auditorías seguidas se propuso.
+    persistencia_mod: HashMap<i64, (usize, u32)>,
     radio: Option<f64>,
     siguiente_id: i64,
     n_hdbscan: u64,
@@ -375,6 +459,9 @@ impl Agrupador {
             conteo: HashMap::new(),
             bufer: VecDeque::with_capacity(p.bufer + 1),
             inicio: Vec::new(),
+            llegadas: 0,
+            modelos: HashMap::new(),
+            persistencia_mod: HashMap::new(),
             radio: None,
             siguiente_id: 0,
             n_hdbscan: 0,
@@ -396,7 +483,7 @@ impl Agrupador {
         &self.p
     }
 
-    fn entra(&mut self, x: Vec<f32>, e: i64) {
+    fn entra(&mut self, x: Espiga, e: i64) {
         self.ventana.push_back((x, e));
         *self.conteo.entry(e).or_default() += 1;
         if self.ventana.len() > self.p.ventana {
@@ -417,7 +504,7 @@ impl Agrupador {
         if k == 0 {
             return (ETIQUETA_RUIDO, false);
         }
-        let vec = k_vecinos(x, self.ventana.iter().map(|(p, _)| p.as_slice()), k, None);
+        let vec = k_vecinos(x, self.ventana.iter().map(|(p, _)| p.x.as_slice()), k, None);
         if media_raiz(&vec) > radio {
             return (ETIQUETA_RUIDO, false);
         }
@@ -431,30 +518,55 @@ impl Agrupador {
         (e, max as f64 >= self.p.voto_minimo * k as f64)
     }
 
-    /// Clasifica una espiga con el estado actual, sin aprender de ella.
+    /// Clasifica una espiga con el estado actual, sin aprender de ella (sólo el
+    /// primer nivel: sin forma de onda no hay subunidad).
     pub fn clasifica_punto(&self, x: &[f32]) -> i64 {
         self.vota(x).0
+    }
+
+    /// Unidad que se emite para una espiga del grupo `g`: el grupo, o la
+    /// subunidad que elige su mezcla si el grupo tiene segundo nivel.
+    fn unidad_de(&self, g: i64, forma: Option<&[f32]>) -> i64 {
+        match (self.modelos.get(&g), forma) {
+            (Some(mg), Some(f)) => mg.ids[mg.modelo.clasifica(f)],
+            _ => g,
+        }
     }
 
     /// Una etiqueta por espiga, en el mismo orden; `ETIQUETA_RUIDO` si no tiene
     /// unidad. Las espigas con NaN/inf salen como ruido y no se aprenden.
     pub fn etiqueta(&mut self, puntos: &[Vec<f32>]) -> Result<Vec<i64>, String> {
+        self.etiqueta_con_formas(puntos, None)
+    }
+
+    /// Como `etiqueta`, con la forma de onda de cada espiga (en el mismo orden).
+    /// Con ellas, la auditoría puede separar unidades con la mezcla de
+    /// gaussianas (`ParamsAgrupador::separacion`).
+    pub fn etiqueta_con_formas(&mut self, puntos: &[Vec<f32>], formas: Option<&[Vec<f32>]>) -> Result<Vec<i64>, String> {
+        if let Some(f) = formas {
+            if f.len() != puntos.len() {
+                return Err(format!("{} puntos y {} formas de onda", puntos.len(), f.len()));
+            }
+        }
         self.recoge_auditoria();
         let mut etiquetas = vec![ETIQUETA_RUIDO; puntos.len()];
         // Espigas de este lote que esperaban el arranque: si arranca en este
         // lote, se etiquetan con lo recién aprendido en vez de salir como ruido.
         let mut esperando: Vec<usize> = Vec::new();
         for (i, x) in puntos.iter().enumerate() {
+            let t = self.llegadas;
+            self.llegadas += 1;
             if !x.iter().all(|v| v.is_finite()) {
                 continue;
             }
+            let mut espiga = Espiga { x: x.clone(), forma: formas.map(|f| f[i].clone()), t, unidad: ETIQUETA_RUIDO };
             match self.dim {
                 None => self.dim = Some(x.len()),
                 Some(d) if d != x.len() => return Err(format!("dimensión {}, se esperaba {d}", x.len())),
                 _ => {}
             }
             if self.radio.is_none() {
-                self.inicio.push(x.clone());
+                self.inicio.push(espiga);
                 esperando.push(i);
                 if self.inicio.len() >= self.p.arranque {
                     self.arranca()?;
@@ -469,14 +581,15 @@ impl Agrupador {
                 continue;
             }
             let (e, claro) = self.vota(x);
-            etiquetas[i] = e;
+            espiga.unidad = self.unidad_de(e, espiga.forma.as_deref());
+            etiquetas[i] = espiga.unidad;
             if e == ETIQUETA_RUIDO {
-                self.bufer.push_back(x.clone());
+                self.bufer.push_back(espiga);
                 if self.bufer.len() > self.p.bufer {
                     self.bufer.pop_front();
                 }
             } else if claro {
-                self.entra(x.clone(), e);
+                self.entra(espiga, e);
             }
             self.anota(e == ETIQUETA_RUIDO);
             self.desde_auditoria += 1;
@@ -503,7 +616,8 @@ impl Agrupador {
     /// Primer agrupamiento: HDBSCAN sobre las espigas del arranque.
     fn arranca(&mut self) -> Result<(), String> {
         let datos = std::mem::take(&mut self.inicio);
-        let cl = hdbscan(&datos, self.p.min_cluster_arranque, self.p.min_samples)?;
+        let xs: Vec<Vec<f32>> = datos.iter().map(|s| s.x.clone()).collect();
+        let cl = hdbscan(&xs, self.p.min_cluster_arranque, self.p.min_samples)?;
         self.n_hdbscan += 1;
         let mut id_de: HashMap<i32, i64> = HashMap::new();
         for (x, &c) in datos.iter().zip(&cl) {
@@ -513,12 +627,12 @@ impl Agrupador {
                 if id == n {
                     self.siguiente_id += 1;
                 }
-                self.entra(x.clone(), id);
+                self.entra(Espiga { unidad: id, ..x.clone() }, id);
             } else {
                 self.bufer.push_back(x.clone());
             }
         }
-        let ventana: Vec<Vec<f32>> = self.ventana.iter().map(|(p, _)| p.clone()).collect();
+        let ventana: Vec<Vec<f32>> = self.ventana.iter().map(|(p, _)| p.x.clone()).collect();
         // Sin ningún grupo, el radio no se puede medir: se reintenta con más espigas.
         self.radio = calcula_radio(&ventana, self.p.vecinos, self.p.percentil_radio);
         if self.radio.is_none() {
@@ -531,8 +645,9 @@ impl Agrupador {
     /// HDBSCAN sobre las espigas sin unidad: un grupo lejos de toda unidad nace.
     fn intenta_nacimientos(&mut self) -> Result<(), String> {
         self.desde_nacimiento = 0;
-        let datos: Vec<Vec<f32>> = self.bufer.iter().cloned().collect();
-        let cl = hdbscan(&datos, self.p.min_cluster_size, self.p.min_samples)?;
+        let datos: Vec<Espiga> = self.bufer.iter().cloned().collect();
+        let xs: Vec<Vec<f32>> = datos.iter().map(|s| s.x.clone()).collect();
+        let cl = hdbscan(&xs, self.p.min_cluster_size, self.p.min_samples)?;
         self.n_hdbscan += 1;
         let radio = self.radio.unwrap_or(f64::INFINITY);
         let mut grupos: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -549,7 +664,7 @@ impl Agrupador {
             // Distancia mediana de sus espigas a la espiga con etiqueta más cercana.
             let mut d: Vec<f64> = miembros
                 .iter()
-                .map(|&i| media_raiz(&k_vecinos(&datos[i], self.ventana.iter().map(|(p, _)| p.as_slice()), 1, None)))
+                .map(|&i| media_raiz(&k_vecinos(&xs[i], self.ventana.iter().map(|(p, _)| p.x.as_slice()), 1, None)))
                 .collect();
             d.sort_by(|a, b| a.total_cmp(b));
             let mediana = d[d.len() / 2];
@@ -557,7 +672,7 @@ impl Agrupador {
                 let id = self.siguiente_id;
                 self.siguiente_id += 1;
                 for &i in miembros {
-                    self.entra(datos[i].clone(), id);
+                    self.entra(Espiga { unidad: id, ..datos[i].clone() }, id);
                 }
             }
             // Nazca o sea el borde de una unidad, sale del búfer: ya se decidió.
@@ -573,17 +688,26 @@ impl Agrupador {
         self.desde_auditoria = 0;
         let n = self.ventana.len();
         let paso = n.div_ceil(MUESTRA_AUDITORIA).max(1);
-        let puntos: Vec<Vec<f32>> = self.ventana.iter().step_by(paso).map(|(p, _)| p.clone()).collect();
+        let puntos: Vec<Vec<f32>> = self.ventana.iter().step_by(paso).map(|(p, _)| p.x.clone()).collect();
+        let tiempos: Vec<u64> = self.ventana.iter().step_by(paso).map(|(p, _)| p.t).collect();
         let etiquetas: Vec<i64> = self.ventana.iter().step_by(paso).map(|(_, e)| *e).collect();
+        let locales = if self.p.separacion.is_some() && self.ventana.iter().any(|(s, _)| s.forma.is_some()) {
+            let espigas: Vec<(i64, Espiga)> = self.ventana.iter().filter(|(s, _)| s.forma.is_some()).map(|(s, e)| (*e, s.clone())).collect();
+            let t0 = espigas.iter().map(|(_, s)| s.t).min().unwrap_or(0);
+            let t1 = espigas.iter().map(|(_, s)| s.t).max().unwrap_or(0);
+            Some(Locales { espigas, tramo: (t0, t1) })
+        } else {
+            None
+        };
         let p = self.p.clone();
         if self.p.auditoria_asincrona {
             let (tx, rx) = mpsc::channel();
             thread::spawn(move || {
-                let _ = tx.send(audita(puntos, etiquetas, p));
+                let _ = tx.send(audita(puntos, tiempos, etiquetas, p, locales));
             });
             self.pendiente = Some(rx);
         } else {
-            let a = audita(puntos, etiquetas, p);
+            let a = audita(puntos, tiempos, etiquetas, p, locales);
             self.aplica_auditoria(a);
         }
     }
@@ -634,9 +758,16 @@ impl Agrupador {
                 continue; // una ya se unió a otra en esta misma ronda
             }
             let (queda, absorbida) = if ca >= cb { (a_, b_) } else { (b_, a_) };
-            for (_, e) in self.ventana.iter_mut() {
-                if *e == absorbida {
+            // El segundo nivel de los dos se descarta: la mezcla del grupo unido
+            // se vuelve a aprender en las auditorías siguientes.
+            self.modelos.remove(&queda);
+            self.modelos.remove(&absorbida);
+            self.persistencia_mod.remove(&queda);
+            self.persistencia_mod.remove(&absorbida);
+            for (s, e) in self.ventana.iter_mut() {
+                if *e == absorbida || *e == queda {
                     *e = queda;
+                    s.unidad = queda;
                 }
             }
             let n = self.conteo.remove(&absorbida).unwrap_or(0);
@@ -658,6 +789,7 @@ impl Agrupador {
         if self.p.separar_tras == 0 {
             return;
         }
+        let modelos_nuevos = a.modelos;
         for (e, muestra) in a.separaciones {
             if self.persistencia_sep.get(&e).copied().unwrap_or(0) < self.p.separar_tras
                 || tocadas.contains(&e)
@@ -667,9 +799,13 @@ impl Agrupador {
             }
             // El cluster con más espigas conserva el id; cada otro recibe uno nuevo.
             let mut tam: HashMap<i32, usize> = HashMap::new();
-            for (_, c) in &muestra {
-                *tam.entry(*c).or_default() += 1;
+            for m in &muestra {
+                *tam.entry(m.c).or_default() += 1;
             }
+            // Cada espiga de la ventana toma el subgrupo con que la vio la
+            // auditoría; las que llegaron después, el de la más cercana (en
+            // forma de onda si hay, si no en el encaje).
+            let por_t: HashMap<u64, i32> = muestra.iter().map(|m| (m.t, m.c)).collect();
             let mayor = *tam.iter().max_by_key(|&(c, &k)| (k, -c)).unwrap().0;
             let mut id_de: HashMap<i32, i64> = HashMap::new();
             let mut nuevas = Vec::new();
@@ -680,19 +816,23 @@ impl Agrupador {
                 nuevas.push(self.siguiente_id);
                 self.siguiente_id += 1;
             }
-            for (x, et) in self.ventana.iter_mut() {
+            for (s, et) in self.ventana.iter_mut() {
                 if *et != e {
                     continue;
                 }
-                let c = muestra
-                    .iter()
-                    .min_by(|a, b| dist2(x, &a.0).total_cmp(&dist2(x, &b.0)))
-                    .map(|m| m.1)
-                    .unwrap_or(mayor);
+                let c = por_t.get(&s.t).copied().unwrap_or_else(|| {
+                    let d = |m: &Miembro| match (&s.forma, &m.forma) {
+                        (Some(a), Some(b)) => dist2(a, b),
+                        _ => dist2(&s.x, &m.x),
+                    };
+                    muestra.iter().min_by(|a, b| d(a).total_cmp(&d(b))).map(|m| m.c).unwrap_or(mayor)
+                });
                 if let Some(&nuevo) = id_de.get(&c) {
                     *et = nuevo;
+                    s.unidad = nuevo;
                 }
             }
+            self.modelos.remove(&e);
             self.conteo.clear();
             for (_, et) in &self.ventana {
                 *self.conteo.entry(*et).or_default() += 1;
@@ -700,6 +840,98 @@ impl Agrupador {
             self.persistencia_sep.remove(&e);
             self.separaciones.push((e, nuevas));
         }
+
+        // Segundo nivel. Un cambio en el número de subunidades de un grupo
+        // (crear su mezcla, quitarla o cambiar cuántas tiene) se aplica tras
+        // `separar_tras` auditorías seguidas que lo propongan; con el mismo
+        // número, la mezcla se reajusta en cada auditoría (así sigue la deriva)
+        // y los ids pasan de la mezcla vieja a la nueva por solapamiento.
+        for (g, res) in modelos_nuevos {
+            if tocadas.contains(&g) || !self.conteo.contains_key(&g) {
+                continue;
+            }
+            let n_viejo = self.modelos.get(&g).map_or(1, |m| m.ids.len());
+            let n_nuevo = res.as_ref().map_or(1, |(m, _)| m.n_subgrupos());
+            if n_nuevo != n_viejo {
+                // Lo que persiste es el sentido del cambio (partir, o volver a
+                // una sola unidad), no el número exacto: de una auditoría a
+                // otra la mezcla puede ver 2 o 3 subgrupos en el mismo grupo, y
+                // exigir el mismo número dejaba sin separar grupos que la mezcla
+                // proponía partir en cada auditoría. Se instala la más reciente.
+                let sentido = n_nuevo.min(2);
+                let pend = self.persistencia_mod.entry(g).or_insert((sentido, 0));
+                if pend.0 != sentido {
+                    *pend = (sentido, 0);
+                }
+                pend.1 += 1;
+                if pend.1 < self.p.separar_tras {
+                    continue;
+                }
+            }
+            self.persistencia_mod.remove(&g);
+            match res {
+                None => self.quita_segundo_nivel(g),
+                Some((modelo, por_t)) => self.pone_segundo_nivel(g, modelo, por_t.into_iter().collect()),
+            }
+        }
+    }
+
+    /// El grupo `g` vuelve a ser una sola unidad, con el id del grupo.
+    fn quita_segundo_nivel(&mut self, g: i64) {
+        let Some(mg) = self.modelos.remove(&g) else { return };
+        for &id in mg.ids.iter().filter(|&&i| i != g) {
+            self.uniones.push((id, g));
+        }
+        for (s, e) in self.ventana.iter_mut() {
+            if *e == g {
+                s.unidad = g;
+            }
+        }
+    }
+
+    /// Instala (o reajusta) la mezcla del grupo `g`. Cada subgrupo nuevo hereda
+    /// el id de la unidad vieja con que más espigas comparte en la ventana; los
+    /// que no heredan ninguno reciben un id nuevo.
+    fn pone_segundo_nivel(&mut self, g: i64, modelo: Modelo, por_t: HashMap<u64, usize>) {
+        let k = modelo.n_subgrupos();
+        let sub_de = |s: &Espiga| por_t.get(&s.t).copied().unwrap_or_else(|| s.forma.as_deref().map_or(0, |f| modelo.clasifica(f)));
+        let mut solape: HashMap<(usize, i64), usize> = HashMap::new();
+        for (s, e) in &self.ventana {
+            if *e == g {
+                *solape.entry((sub_de(s), s.unidad)).or_default() += 1;
+            }
+        }
+        let mut pares: Vec<((usize, i64), usize)> = solape.into_iter().collect();
+        pares.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut ids: Vec<Option<i64>> = vec![None; k];
+        let mut usados: Vec<i64> = Vec::new();
+        for ((sub, id), _) in pares {
+            if ids[sub].is_none() && id >= 0 && !usados.contains(&id) {
+                ids[sub] = Some(id);
+                usados.push(id);
+            }
+        }
+        let mut nuevas = Vec::new();
+        let ids: Vec<i64> = ids
+            .into_iter()
+            .map(|id| {
+                id.unwrap_or_else(|| {
+                    let n = self.siguiente_id;
+                    self.siguiente_id += 1;
+                    nuevas.push(n);
+                    n
+                })
+            })
+            .collect();
+        for (s, e) in self.ventana.iter_mut() {
+            if *e == g {
+                s.unidad = ids[sub_de(s)];
+            }
+        }
+        if !nuevas.is_empty() {
+            self.separaciones.push((g, nuevas));
+        }
+        self.modelos.insert(g, ModeloGrupo { modelo, ids });
     }
 
     /// Separaciones aplicadas: (etiqueta original, etiquetas nuevas).
@@ -727,9 +959,21 @@ impl Agrupador {
         &self.propuestas
     }
 
-    /// Etiquetas con al menos `min_cluster_size` espigas en la ventana.
+    /// Unidades (grupos, o sus subunidades si tienen segundo nivel) con al
+    /// menos `min_cluster_size` espigas en la ventana.
     pub fn n_unidades(&self) -> usize {
-        self.conteo.values().filter(|&&c| c >= self.p.min_cluster_size).count()
+        let mut c: HashMap<i64, usize> = HashMap::new();
+        for (s, _) in &self.ventana {
+            *c.entry(s.unidad).or_default() += 1;
+        }
+        c.values().filter(|&&n| n >= self.p.min_cluster_size).count()
+    }
+
+    /// Grupos con segundo nivel: (grupo, ids de sus subunidades).
+    pub fn segundo_nivel(&self) -> Vec<(i64, Vec<i64>)> {
+        let mut v: Vec<(i64, Vec<i64>)> = self.modelos.iter().map(|(&g, m)| (g, m.ids.clone())).collect();
+        v.sort_unstable();
+        v
     }
 
     /// Ids distintos entregados en toda la sesión.

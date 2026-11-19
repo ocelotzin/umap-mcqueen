@@ -88,6 +88,9 @@ impl Motor {
 
         // `fast-umap` NO normaliza en `transform` aunque sí al entrenar
         // (ver normaliza::NormalizadorDeEntrada).
+        //La forma de onda cruda de cada espiga, para la separación por mezcla de
+        //gaussianas de la auditoría (ver umap_mcqueen::mezcla).
+        let formas: Vec<Vec<f32>> = lote.iter().map(|f| f.iter().map(|&v| v as f32).collect()).collect();
         let entrada = self.norm_entrada.aplica(lote)?;
         let encaje = self.norm.aplica(self.fitted.transform(entrada));
         let fuera_de_rango = self.norm.fuera_de_rango(&encaje);
@@ -99,7 +102,7 @@ impl Motor {
 
         // Propagación de etiquetas por vecindad: lo mismo que la CLI
         // (`umap_mcqueen::agrupador::Agrupador`).
-        let etiquetas = self.agrupador.etiqueta(&puntos)?;
+        let etiquetas = self.agrupador.etiqueta_con_formas(&puntos, Some(&formas))?;
 
         Ok(Resultado {
             etiquetas,

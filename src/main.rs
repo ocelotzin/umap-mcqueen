@@ -71,6 +71,8 @@ struct Opciones {
     sim_seed: u64,
     semilla: u64, // Semilla de todos los generadores del entrenamiento
     etiquetas: Option<String>, // CSV donde escribir una etiqueta por forma de onda
+    encaje: Option<String>, // CSV donde escribir las coordenadas de cada forma de onda
+    separacion_hdbscan: bool, // separar con HDBSCAN sobre el encaje (lo de antes)
 }
 
 const USO: &str = "\
@@ -93,6 +95,12 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
                             TODAS las formas de onda: también las de entrenamiento y las
                             del último lote incompleto, y la auditoría del agrupador corre
                             en este mismo hilo (resultado reproducible)
+  --encaje <ruta>           escribe en <ruta> las coordenadas normalizadas del encaje de
+                            cada forma de onda (x,y), una por línea y en el mismo orden
+                            que --etiquetas, que es obligatoria con esta opción
+  --separacion-hdbscan      la auditoría separa unidades con HDBSCAN sobre el encaje,
+                            como antes, en vez de con la mezcla de gaussianas sobre
+                            las formas de onda de cada unidad (ver src/mezcla.rs)
 ";
 
 //Argumentos de ejecución, regresa una variable tipo opciones y comprueba que
@@ -111,6 +119,8 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         sim_seed : rng.gen_range(33333..=9999999),
         semilla: DEFAULT_SEED,
         etiquetas: None,
+        encaje: None,
+        separacion_hdbscan: false,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -123,6 +133,8 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--vectores-sim" => o.nsim = args.next().ok_or("--vectores-simulados necesita un número natural")?.parse()?,
             "--semilla-sim" => o.sim_seed = args.next().ok_or("--semilla-sim necesita un número natural")?.parse()?,
             "--etiquetas" => o.etiquetas = Some(args.next().ok_or("--etiquetas necesita una ruta")?),
+            "--encaje" => o.encaje = Some(args.next().ok_or("--encaje necesita una ruta")?),
+            "--separacion-hdbscan" => o.separacion_hdbscan = true,
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -136,6 +148,9 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
     }
     if o.cargar && o.modelo.is_none() {
         return Err("--cargar necesita --modelo".into());
+    }
+    if o.encaje.is_some() && o.etiquetas.is_none() {
+        return Err("--encaje necesita --etiquetas (sólo así se procesan todas las formas de onda, en orden)".into());
     }
     Ok(o)
 }
@@ -176,11 +191,14 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     //Al escribir etiquetas, la auditoría corre en este hilo: al leer un archivo las
     //espigas llegan más rápido que una auditoría en segundo plano, y así el
     //resultado no depende de la velocidad de la máquina.
-    let mut etiquetador = if opts.etiquetas.is_some() {
-        Agrupador::new(umap_mcqueen::agrupador::ParamsAgrupador { auditoria_asincrona: false, ..Default::default() })?
-    } else {
-        Agrupador::default()
+    let mut params = umap_mcqueen::agrupador::ParamsAgrupador {
+        auditoria_asincrona: opts.etiquetas.is_none(),
+        ..Default::default()
     };
+    if opts.separacion_hdbscan {
+        params.separacion = None;
+    }
+    let mut etiquetador = Agrupador::new(params)?;
     //Etiqueta de cada forma de onda, en orden (sólo con --etiquetas).
     let mut todas_las_etiquetas: Vec<i64> = Vec::new();
     //Formas de onda por etiqueta en toda la sesión.
@@ -340,7 +358,10 @@ fn main_err() -> Result<(), Box<dyn Error>> {
             .collect();
 
         //Una etiqueta por forma de onda (ETIQUETA_RUIDO = -1 si no tiene unidad).
-        let etiquetas = match etq.etiqueta(&puntos_f32) {
+        //La forma de onda cruda de cada espiga: la auditoría separa unidades con
+        //una mezcla de gaussianas sobre ellas (ver src/mezcla.rs).
+        let formas: Vec<Vec<f32>> = lote.iter().map(|f| f.iter().map(|&v| v as f32).collect()).collect();
+        let etiquetas = match etq.etiqueta_con_formas(&puntos_f32, Some(&formas)) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("El agrupador rechazó el lote {i}: {e}");
@@ -438,6 +459,15 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         }
         std::fs::write(ruta, texto)?;
         println!("\nEtiquetas: {} formas de onda, una por línea y en el orden del CSV, en {}", todas_las_etiquetas.len(), ruta);
+    }
+    if let Some(ruta) = &opts.encaje {
+        //`total_puntos` se llena en el mismo orden que `todas_las_etiquetas`.
+        let mut texto = String::with_capacity(total_puntos.len() * 20);
+        for (x, y) in &total_puntos {
+            texto.push_str(&format!("{x},{y}\n"));
+        }
+        std::fs::write(ruta, texto)?;
+        println!("Encaje: {} formas de onda en {}", total_puntos.len(), ruta);
     }
 
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
