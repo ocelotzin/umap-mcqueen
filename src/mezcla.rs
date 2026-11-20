@@ -123,6 +123,18 @@ pub fn ajusta_modelo(formas: &[&[f32]], tiempos: &[u64], tramo: (u64, u64), p: &
     Some((Modelo { proy, mezcla, subgrupo_de, n_subgrupos }, sub))
 }
 
+/// Diagnóstico: los subgrupos de la mezcla (ya limpios) antes del filtro
+/// temporal, o `None` si la mezcla no parte.
+pub fn subgrupos_sin_filtro(formas: &[&[f32]], p: &ParamsSeparacion) -> Option<Vec<usize>> {
+    let n_min = p.min_tam(formas.len());
+    if formas.len() < 2 * n_min || formas.is_empty() || formas[0].is_empty() {
+        return None;
+    }
+    let (_, x) = pca_local(formas, p.n_pca)?;
+    let (_, comp) = gmm_bic(&x, p.k_max, n_min)?;
+    limpia(comp, &x, n_min)
+}
+
 // ---------------------------------------------------------------- PCA local
 
 /// Estandarización y ejes principales medidos sobre las espigas de una unidad.

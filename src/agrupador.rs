@@ -37,6 +37,21 @@
 //! `separaciones`; con `unir_tras`/`separar_tras` en 0 nunca se aplican. La
 //! misma auditoría recalcula el `radio`.
 //!
+//! **Segundo nivel** (con formas de onda y `separacion`). Dos neuronas que se
+//! solapan en el encaje 2D no tienen valle de densidad: HDBSCAN no las separa
+//! y el voto las vuelve a mezclar. Lo de arriba es entonces el primer nivel:
+//! el voto elige un **grupo**. En cada auditoría se ajusta, para cada grupo,
+//! una mezcla de gaussianas sobre el PCA local de sus formas de onda
+//! (`mezcla::ajusta_modelo`, con filtro de coexistencia temporal para no
+//! partir una neurona que deriva); el modelo elige la **subunidad** de cada
+//! espiga del grupo. Los ids de las subunidades pasan de un modelo al
+//! siguiente por coincidencia de espigas; instalar o quitar un segundo nivel
+//! (cambiar cuántas subunidades hay) también espera `separar_tras`
+//! auditorías. Con `vetar_uniones`, una unión clara del primer nivel no
+//! cuenta si la mezcla ajustada a los dos grupos juntos los vuelve a separar:
+//! son dos neuronas solapadas, no una. Sin ese veto, las uniones juntaban
+//! neuronas distintas y el segundo nivel no las recuperaba.
+//!
 //! Medido en un encaje real de 94 208 espigas (prototipo): el cambio de
 //! etiqueta de un lote al siguiente sobre una sonda fija nunca pasó de 1.5 %
 //! (con reajustes periódicos de HDBSCAN llegaba al 95 %, y al 11 % en el 1 % de
@@ -85,8 +100,12 @@ pub const FACTOR_NACER: f64 = 2.0;
 pub const BUFER: usize = 1_000;
 /// Espigas sin unidad mínimas para intentar un nacimiento.
 pub const BUFER_MINIMO: usize = 300;
-/// Cada cuántas espigas se audita (en otro hilo).
-pub const AUDITORIA: usize = 5_000;
+/// Cada cuántas espigas se audita (en otro hilo). Con 5 000 y `separar_tras`
+/// 3, el segundo nivel no podía instalarse antes de ~15 000 espigas: en las
+/// sesiones de 600 s de la verdad de campo casi ninguna espiga de un grupo
+/// mezclado se emitía con él. Con 2 000, el ARI de la segunda mitad pasó de
+/// 0.52 a 0.60 (mediana por canal, 16 canales).
+pub const AUDITORIA: usize = 2_000;
 /// Espigas de la ventana que mira la auditoría.
 pub const MUESTRA_AUDITORIA: usize = 2_500;
 /// En la auditoría, fracción de una etiqueta que tiene que caer en un cluster
@@ -138,6 +157,9 @@ pub struct ParamsAgrupador {
     /// de onda (`etiqueta_con_formas`); si no, o con `None`, la auditoría separa
     /// con HDBSCAN sobre el encaje como antes.
     pub separacion: Option<ParamsSeparacion>,
+    /// Con formas de onda, una unión clara no cuenta si la mezcla ajustada a
+    /// los dos grupos juntos los vuelve a separar.
+    pub vetar_uniones: bool,
 }
 
 impl Default for ParamsAgrupador {
@@ -158,6 +180,7 @@ impl Default for ParamsAgrupador {
             unir_tras: UNIR_TRAS,
             separar_tras: SEPARAR_TRAS,
             separacion: Some(ParamsSeparacion::default()),
+            vetar_uniones: true,
         }
     }
 }
@@ -383,6 +406,24 @@ fn audita(puntos: Vec<Vec<f32>>, tiempos: Vec<u64>, etiquetas: Vec<i64>, p: Para
             if e >= 0 {
                 por_etiqueta.entry(e).or_default().push(esp);
             }
+        }
+        // Veto a las uniones: dos grupos que el 2D junta pero cuyas formas de
+        // onda la mezcla vuelve a separar (la mayoría de cada uno cae en un
+        // subgrupo distinto) son dos neuronas solapadas en el encaje, no una.
+        if p.vetar_uniones {
+            claras.retain(|&(a, b)| {
+                let (Some(ea), Some(eb)) = (por_etiqueta.get(&a), por_etiqueta.get(&b)) else { return true };
+                let juntas: Vec<&Espiga> = ea.iter().chain(eb).collect();
+                let formas: Vec<&[f32]> = juntas.iter().map(|s| s.forma.as_deref().unwrap_or(&[])).collect();
+                let t: Vec<u64> = juntas.iter().map(|s| s.t).collect();
+                let Some((m, sub)) = ajusta_modelo(&formas, &t, loc.tramo, ps) else { return true };
+                let mayoria = |r: &[usize]| {
+                    let mut v = vec![0usize; m.n_subgrupos()];
+                    r.iter().for_each(|&s| v[s] += 1);
+                    (0..v.len()).max_by_key(|&s| v[s]).unwrap_or(0)
+                };
+                mayoria(&sub[..ea.len()]) == mayoria(&sub[ea.len()..])
+            });
         }
         let mut claves: Vec<i64> = por_etiqueta.keys().copied().collect();
         claves.sort_unstable();
@@ -984,6 +1025,11 @@ impl Agrupador {
     /// Veces que corrió HDBSCAN (arranque, nacimientos y auditorías).
     pub fn n_ajustes(&self) -> u64 {
         self.n_hdbscan
+    }
+
+    /// (llegada, grupo) de cada espiga de la ventana, de la más vieja a la más nueva.
+    pub fn ventana_grupos(&self) -> Vec<(u64, i64)> {
+        self.ventana.iter().map(|(s, e)| (s.t, *e)).collect()
     }
 
     /// Espigas con etiqueta en la ventana.

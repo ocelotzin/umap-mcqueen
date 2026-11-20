@@ -31,13 +31,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut p = ParamsAgrupador { auditoria_asincrona: false, ..Default::default() };
     let mut con_formas = true;
+    let mut traza: Option<String> = None;
     for a in &args[3..] {
         match a.split_once('=') {
             Some(("separar_tras", v)) => p.separar_tras = v.parse()?,
             Some(("unir_tras", v)) => p.unir_tras = v.parse()?,
             Some(("auditoria", v)) => p.auditoria = v.parse()?,
             Some(("ventana", v)) => p.ventana = v.parse()?,
+            Some(("vetar", v)) => p.vetar_uniones = v.parse()?,
             Some(("coexistencia", v)) => p.separacion.as_mut().ok_or("sin separación")?.coexistencia_minima = v.parse()?,
+            Some(("traza", v)) => traza = Some(v.to_string()),
             None if a == "sin_formas" => con_formas = false,
             _ => return Err(format!("argumento desconocido: {a}").into()),
         }
@@ -45,7 +48,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut agr = Agrupador::new(p)?;
     let mut etiquetas = Vec::with_capacity(encaje.len());
     let (mut n_sep, mut n_uni) = (0, 0);
+    // traza: grupo de primer nivel de cada espiga y si ese grupo tenía segundo nivel.
+    let mut filas_traza = String::new();
     for (k, (pts, fs)) in encaje.chunks(200).zip(formas.chunks(200)).enumerate() {
+        if traza.is_some() {
+            let con_modelo: std::collections::HashSet<i64> = agr.segundo_nivel().into_iter().map(|(g, _)| g).collect();
+            for x in pts {
+                let g = agr.clasifica_punto(x);
+                filas_traza.push_str(&format!("{g},{}\n", con_modelo.contains(&g) as u8));
+            }
+        }
         let e = if con_formas { agr.etiqueta_con_formas(pts, Some(fs))? } else { agr.etiqueta(pts)? };
         etiquetas.extend(e);
         let propuestas: Vec<_> = agr.propuestas().iter().filter(|p| matches!(p, umap_mcqueen::agrupador::Propuesta::Separar(_))).collect();
@@ -62,6 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     std::fs::write(&args[2], etiquetas.iter().map(|e| format!("{e}\n")).collect::<String>())?;
+    if let Some(r) = traza {
+        std::fs::write(r, filas_traza)?;
+    }
     println!("ids emitidos {} · unidades {}", agr.n_ids_emitidos(), agr.n_unidades());
     Ok(())
 }
