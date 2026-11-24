@@ -10,8 +10,9 @@ use fast_umap::prelude::*;
 //Para graficar
 use textplots::{Chart, Plot, Shape};
 
-//Para clustering
-use clump::DenStream;
+//Para clustering: EROLSC con ventana movible sobre el encaje
+mod erolsc;
+use erolsc::Erolsc;
 
 //Guardado y carga verificada del modelo
 mod modelo;
@@ -41,6 +42,8 @@ struct Opciones {
     modelo: Option<String>,
     /// Cargar el modelo de `modelo` en vez de entrenar uno nuevo.
     cargar: bool,
+    /// Puntos del encaje en la ventana movible de EROLSC.
+    ventana: usize,
 }
 
 const USO: &str = "\
@@ -50,6 +53,7 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --cargar          carga el modelo de --modelo en vez de entrenar
   --train <n>       formas de onda de entrenamiento (por defecto 400)
   --lote <n>        tamaño de lote (por defecto 200)
+  --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 1000)
 ";
 
 fn opciones() -> Result<Opciones, Box<dyn Error>> {
@@ -60,6 +64,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         batch_size: BATCH_SIZE,
         modelo: None,
         cargar: false,
+        ventana: erolsc::VENTANA,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -67,6 +72,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--cargar" => o.cargar = true,
             "--train" => o.train_size = args.next().ok_or("--train necesita un número")?.parse()?,
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
+            "--ventana" => o.ventana = args.next().ok_or("--ventana necesita un número")?.parse()?,
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -138,11 +144,12 @@ fn corre() -> Result<(), Box<dyn Error>> {
 
     let config = configuracion();
 
-    //Configuración DenStream
-    let mut ds = DenStream::new(0.1, 3)
-        .with_beta(0.5)
-        .with_lambda(0.01)
-        .with_mu(1.0);
+    //EROLSC: se inicializa con los primeros `ventana` puntos del encaje y luego
+    //sus gaussianas se estiman siempre sobre los últimos `ventana` puntos.
+    let mut agrupador = Erolsc::new(erolsc::Parametros {
+        ventana: opts.ventana,
+        ..Default::default()
+    })?;
 
     //Lector de CSV
     let mut lector = lector(&opts.csv)?;
@@ -209,8 +216,8 @@ fn corre() -> Result<(), Box<dyn Error>> {
         println!("Dimensión reducida del encaje primario: {} × {}", encaje.len(), encaje[0].len());
 
         //La referencia de normalización se mide UNA VEZ, aquí, sobre el encaje de
-        //entrenamiento. Antes se medía por lote, y eso movía el suelo bajo DenStream
-        //más que su propio epsilon (ver `normaliza.rs`).
+        //entrenamiento. Antes se medía por lote, y eso movía el suelo bajo el
+        //agrupador más que su propio umbral (ver `normaliza.rs`).
         let norm = Normalizador::ajusta(encaje).ok_or(
             "no se pudo medir la referencia de normalización sobre el encaje de \
              entrenamiento (¿vacío, o todos los valores iguales?)",
@@ -230,8 +237,8 @@ fn corre() -> Result<(), Box<dyn Error>> {
 
     let mut total_puntos: Vec<(f32, f32)> = Vec::new();
 
-    //Procesa un lote: encaje, normalización, DenStream y gráfica.
-    let procesa_lote = |lote: &[Vec<f64>], i: usize, ds: &mut DenStream, total: &mut Vec<(f32, f32)>| {
+    //Procesa un lote: encaje, normalización, EROLSC y gráfica.
+    let procesa_lote = |lote: &[Vec<f64>], i: usize, agr: &mut Erolsc, total: &mut Vec<(f32, f32)>| -> Result<(), Box<dyn Error>> {
         //`fast-umap` NO normaliza en `transform`, aunque sí lo hace al entrenar.
         //Sin esta línea la red recibe datos crudos y devuelve coordenadas cinco
         //órdenes de magnitud fuera del encaje.
@@ -244,21 +251,22 @@ fn corre() -> Result<(), Box<dyn Error>> {
         let embedding_normalizado = normalizador.aplica(nuevo_embedding);
         let fuera = normalizador.fuera_de_rango(&embedding_normalizado);
 
-        //Tenemos que normalizar los datos de salida, esto para que
-        //DenStream trabaje bajo los parametros dados.
-        let puntos_f32: Vec<Vec<f32>> = embedding_normalizado
-            .iter()
-            .map(|fila| vec![fila[0] as f32, fila[1] as f32])
-            .collect();
-
-        let _ = ds.update_batch(&puntos_f32);
+        let etiquetas = agr.actualiza_lote(&embedding_normalizado)?;
+        let ruido = etiquetas.iter().filter(|&&e| e == erolsc::RUIDO).count();
 
         //Con referencia fija, salirse de [0,1] deja de ser imposible y pasa a ser
         //una señal: si crece, el modelo ya no representa lo que llega.
-        println!(
-            "--- Lote en índice {}: {} micro clusters · {:.1}% fuera de [0,1] ---",
-            i, ds.n_clusters(), 100.0 * fuera
-        );
+        if agr.inicializado() {
+            println!(
+                "--- Lote en índice {}: {} grupos ({} activos en la ventana) · {} anomalías en el lote, {} en la ventana · {:.1}% fuera de [0,1] ---",
+                i, agr.n_grupos(), agr.n_activos(), ruido, agr.n_anomalias(), 100.0 * fuera
+            );
+        } else {
+            println!(
+                "--- Lote en índice {}: llenando la ventana de EROLSC ({}/{}) · {:.1}% fuera de [0,1] ---",
+                i, agr.n_ventana(), agr.params().ventana, 100.0 * fuera
+            );
+        }
 
         let puntos: Vec<(f32, f32)> = embedding_normalizado // Para graficar el embedding,
             .iter()
@@ -271,6 +279,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
         Chart::new_with_y_range(230, 120, 0.0, 1.0, 0.0, 1.0)
             .lineplot(&Shape::Points(&puntos))
             .display();
+        Ok(())
     };
 
     let mut ultimo = 0usize;
@@ -280,7 +289,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
         ultimo = i;
 
         if buffer_crudo.len() == opts.batch_size {
-            procesa_lote(&buffer_crudo, i, &mut ds, &mut total_puntos);
+            procesa_lote(&buffer_crudo, i, &mut agrupador, &mut total_puntos)?;
             buffer_crudo.clear();
         }
     }
@@ -289,10 +298,13 @@ fn corre() -> Result<(), Box<dyn Error>> {
     //formas de onda del final del fichero no se procesaban nunca.
     if !buffer_crudo.is_empty() {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
-        procesa_lote(&buffer_crudo, ultimo, &mut ds, &mut total_puntos);
+        procesa_lote(&buffer_crudo, ultimo, &mut agrupador, &mut total_puntos)?;
     }
 
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
+    for (id, media, n) in agrupador.grupos() {
+        println!("  grupo {id}: centro ({:.3}, {:.3}) · {n} puntos en la ventana", media[0], media[1]);
+    }
 
     Ok(())
 }
