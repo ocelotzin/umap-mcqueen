@@ -15,6 +15,9 @@ params:
   verdad: "labels.csv"                 # etiquetas verdaderas
   erolsc: "erolsc_labels.csv"          # EROLSC, rama erolsc (scripts/etiqueta_erolsc.sh)
   dev: "mcqueen_labels.csv"            # propagación de etiquetas, rama dev (scripts/etiqueta_carpeta.py)
+  rejilla: "erolsc_rejilla.csv"        # rejilla de EROLSC por canal (examples/sonda_de_erolsc.rs), para la validación cruzada
+  rejilla_ventana: "erolsc_rejilla_ventana.csv"  # rejilla que barre también el tamaño de la ventana
+  semillas: "1,2,3"                    # otras semillas de UMAP (archivos <etiquetas>_s<semilla>.csv), además de 9999
   min_verdad: 50                       # neuronas (o unidades de referencia) con menos espigas no se evalúan
   umbral: 0.8                          # exactitud para contar una neurona como recuperada
   min_pts: 0                           # HDBSCAN: 0 = automático (0.5 % de la muestra, entre 10 y 200)
@@ -202,14 +205,79 @@ cref <- bind_rows(contra_ref) %>% mutate(metodo = factor(metodo, levels = metodo
 n_canales <- length(unique(res$canal))
 ```
 
+```{r validacion, include=FALSE}
+# --- Validación cruzada dejando un canal fuera -------------------------------
+# Los parámetros por defecto de EROLSC se eligieron con estos mismos canales y
+# contra esta misma verdad. Para medirlo fuera de muestra, cada canal se evalúa
+# con la combinación de la rejilla (examples/sonda_de_erolsc.rs, un
+# erolsc_rejilla.csv por canal, sobre el mismo encaje) que mejor ARI medio da en
+# los OTROS canales.
+rejillas <- bind_rows(lapply(sort(dirs), function(dir) {
+  f <- file.path(dir, params$rejilla)
+  if (!file.exists(f)) return(NULL)
+  read_csv(f, show_col_types = FALSE, progress = FALSE) %>% mutate(canal = basename(dir))
+}))
+claves <- c("td", "tn", "m", "fusion", "c")
+tiene_cv <- nrow(rejillas) > 0 && n_distinct(rejillas$canal) == n_canales
+ari_de <- function(met) res %>% filter(metodo == met) %>% select(canal, ari)
+if (tiene_cv) {
+  cv <- bind_rows(lapply(sort(unique(rejillas$canal)), function(cn) {
+    elegido <- rejillas %>% filter(canal != cn) %>% group_by(across(all_of(claves))) %>%
+      summarise(ari_otros = mean(ari), n = n(), .groups = "drop") %>%
+      filter(n == n_canales - 1) %>% arrange(desc(ari_otros)) %>% slice(1)
+    fila <- rejillas %>% filter(canal == cn) %>% semi_join(elegido, by = claves)
+    tibble(canal = cn, td = elegido$td, tn = elegido$tn, m = elegido$m, ari_cv = fila$ari)
+  })) %>%
+    left_join(ari_de("EROLSC") %>% rename(ari_defecto = ari), by = "canal") %>%
+    left_join(ari_de("Propagación (dev)") %>% rename(ari_dev = ari), by = "canal") %>%
+    left_join(ari_de("UMAP + HDBSCAN") %>% rename(ari_hdbscan = ari), by = "canal")
+  set.seed(params$semilla)
+  ic_boot <- function(d) quantile(replicate(10000, mean(sample(d, replace = TRUE))), c(0.025, 0.975))
+  dif_cv <- cv$ari_cv - cv$ari_dev
+  ic_cv <- ic_boot(dif_cv)
+  p_cv <- wilcox.test(cv$ari_cv, cv$ari_dev, paired = TRUE, exact = FALSE)$p.value
+  dif_hdb <- cv$ari_cv - cv$ari_hdbscan
+  ic_hdb <- ic_boot(dif_hdb)
+  p_hdb <- wilcox.test(cv$ari_cv, cv$ari_hdbscan, paired = TRUE, exact = FALSE)$p.value
+}
+
+# --- Otras semillas de UMAP ---------------------------------------------------
+# Con cada semilla se entrena otro UMAP paramétrico; los dos agrupadores corren
+# sobre el encaje de esa semilla (el mismo para los dos). Semilla 9999: los
+# archivos sin sufijo; las demás: <archivo>_s<semilla>.csv.
+semillas <- c(9999, as.integer(strsplit(params$semillas, ",")[[1]]))
+sufijo <- function(s) if (s == 9999) "" else paste0("_s", s)
+con_sufijo <- function(f, s) sub("\\.csv$", paste0(sufijo(s), ".csv"), f)
+por_semilla <- bind_rows(lapply(sort(dirs), function(dir) {
+  verdad <- lee_etiquetas(file.path(dir, params$verdad))
+  bind_rows(lapply(semillas, function(s) {
+    fe <- file.path(dir, con_sufijo(params$erolsc, s)); fd <- file.path(dir, con_sufijo(params$dev, s))
+    if (!file.exists(fe) || !file.exists(fd)) return(NULL)
+    tibble(canal = basename(dir), semilla = s,
+           EROLSC = ari(lee_etiquetas(fe), verdad), `Propagación (dev)` = ari(lee_etiquetas(fd), verdad))
+  }))
+}))
+semillas_ok <- por_semilla %>% count(semilla) %>% filter(n == n_canales) %>% pull(semilla)
+por_semilla <- por_semilla %>% filter(semilla %in% semillas_ok)
+tiene_semillas <- length(semillas_ok) > 1
+if (tiene_semillas) {
+  por_canal_sem <- por_semilla %>% group_by(canal) %>%
+    summarise(dif = mean(EROLSC - `Propagación (dev)`), .groups = "drop")
+  p_sem <- wilcox.test(por_canal_sem$dif, exact = FALSE)$p.value
+  set.seed(params$semilla)
+  ic_sem <- quantile(replicate(10000, mean(sample(por_canal_sem$dif, replace = TRUE))), c(0.025, 0.975))
+  gana_sem <- sum(por_semilla$EROLSC > por_semilla$`Propagación (dev)`)
+}
+```
+
 # Objetivo
 
 Comparar los dos agrupadores en línea de umap-mcqueen entre sí, tomando **UMAP + HDBSCAN offline** como punto de
 referencia:
 
 - **EROLSC** (rama `erolsc`): *Extended Robust On-Line Streaming Clustering* (Ibrahim, Du y Keller, 2018) sobre el
-  encaje del UMAP paramétrico, con una ventana movible de 1000 espigas. PCM inicializa; cada espiga entra a la
-  gaussiana más cercana por distancia de Mahalanobis si está a menos de `Td` = 2.5, y si no va al historial de
+  encaje del UMAP paramétrico, con una ventana movible de 4000 espigas. PCM inicializa; cada espiga entra a la
+  gaussiana más cercana por distancia de Mahalanobis si está a menos de `Td` = 2.25, y si no va al historial de
   anomalías, del que nacen grupos nuevos (`r params$erolsc`, de `scripts/etiqueta_erolsc.sh`).
 - **Propagación (dev)** (rama `dev`): propagación de etiquetas por vecindad sobre una ventana de espigas
   recientes, con nacimientos y auditorías por HDBSCAN (`r params$dev`, de `scripts/etiqueta_carpeta.py`).
@@ -217,13 +285,56 @@ referencia:
   (`dbscan`) sobre el encaje, viendo todo el canal a la vez. Es el mismo etiquetado de referencia de
   `comparacion_cuatro_etiquetados.Rmd` (se lee de `umap_hdbscan_labels.csv`; se calcula si no existe).
 
-Los dos métodos en línea usan el mismo UMAP paramétrico (primeras 2000 espigas de cada canal, lotes de 200);
-sólo cambia el agrupador. La comparación se hace de dos formas:
+Los dos métodos en línea agrupan **el mismo encaje**: UMAP paramétrico entrenado con las primeras 2000 espigas de
+cada canal y semilla 9999, lotes de 200. Con la semilla fija el entrenamiento es reproducible, y el encaje sobre el
+que agrupa EROLSC (`erolsc_encaje.csv`) es idéntico, valor por valor, al de dev (`encaje.csv`) en los 16 canales:
+sólo cambia el agrupador. La comparación se hace de cuatro formas:
 
 1. **Contra UMAP + HDBSCAN**: ¿cuánto se parece cada método en línea a lo que haría el agrupador offline usual?
 2. **Contra la verdad de campo**: ¿cuál acierta más? Aquí UMAP + HDBSCAN entra como un tercer método.
+3. **Validación cruzada**: lo mismo, con los parámetros de EROLSC elegidos sin el canal evaluado.
+4. **Otras semillas de UMAP**: ¿se sostiene la diferencia con otros encajes?
 
-Parecerse a HDBSCAN y acertar no son lo mismo; la sección 3.3 los pone lado a lado.
+Parecerse a HDBSCAN y acertar no son lo mismo; la sección «Parecerse a HDBSCAN frente a acertar» los pone lado a
+lado.
+
+# Conclusión
+
+```{r conclusion, results = "asis", echo = FALSE}
+p_txt <- function(p) { f <- p_fmt(p); if (startsWith(f, "<")) paste("p", f) else paste("p =", f) }
+if (tiene_cv) {
+  cat(sprintf(paste0(
+    "- **Fuera de muestra, %s** Con los parámetros ",
+    "elegidos sin el canal evaluado, su ARI medio es %s frente a %s de la propagación, sobre el mismo encaje. ",
+    "La diferencia media es %s (IC 95 %% bootstrap [%s, %s]; Wilcoxon pareado %s; EROLSC es mayor en %d de %d ",
+    "canales).\n"),
+    if (ic_cv[1] > 0) "EROLSC acierta más que la propagación de dev, y el intervalo excluye el cero." else
+      if (ic_cv[2] < 0) "EROLSC acierta menos que la propagación de dev." else
+        "EROLSC no acierta claramente más que la propagación de dev: el intervalo incluye el cero.",
+    num(mean(cv$ari_cv), 3), num(mean(cv$ari_dev), 3), num(mean(dif_cv), 3), num(ic_cv[1], 3), num(ic_cv[2], 3),
+    p_txt(p_cv), sum(dif_cv > 0), nrow(cv)))
+  cat(sprintf(paste0(
+    "- **Los parámetros por defecto son optimistas.** Elegidos con estos mismos canales, dan ARI medio %s; ",
+    "fuera de muestra, %s.\n"), num(mean(cv$ari_defecto), 3), num(mean(cv$ari_cv), 3)))
+  cat(sprintf(paste0(
+    "- **Frente a UMAP + HDBSCAN offline** (ARI medio %s) la diferencia de EROLSC fuera de muestra es %s ",
+    "(IC 95 %% [%s, %s]; %s), y HDBSCAN recupera más neuronas con exactitud ≥ %s (%d contra %d).\n"),
+    num(mean(cv$ari_hdbscan), 3), num(mean(dif_hdb), 3), num(ic_hdb[1], 3), num(ic_hdb[2], 3), p_txt(p_hdb),
+    params$umbral, sum(res$recuperadas[res$metodo == "UMAP + HDBSCAN"]), sum(res$recuperadas[res$metodo == "EROLSC"])))
+}
+if (tiene_semillas) {
+  cat(sprintf(paste0(
+    "- **Con %d semillas de UMAP** (%s), EROLSC supera a la propagación en %d de %d pares canal-semilla; la ",
+    "diferencia media por canal es %s (IC 95 %% [%s, %s]; Wilcoxon %s). Estas corridas usan los parámetros ",
+    "por defecto de EROLSC, así que heredan su optimismo.\n"),
+    length(semillas_ok), paste(semillas_ok, collapse = ", "), gana_sem, nrow(por_semilla),
+    num(mean(por_canal_sem$dif), 3), num(ic_sem[1], 3), num(ic_sem[2], 3), p_txt(p_sem)))
+}
+cat(paste0(
+  "- **Falta un registro independiente.** Los 16 canales son del mismo registro híbrido, y la calibración y la ",
+  "evaluación salen de ellos. Una ventaja de EROLSC sólo quedaría establecida en datos que no se usaron para ",
+  "elegir sus parámetros.\n"))
+```
 
 # Datos
 
@@ -351,6 +462,136 @@ neu %>%
        title = "Cada punto es una neurona (sobre la diagonal, EROLSC acierta más)")
 ```
 
+## Validación cruzada: parámetros elegidos sin el canal evaluado
+
+Los parámetros por defecto de EROLSC (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con estos mismos 16 canales y contra
+esta misma verdad, así que su ARI en la sección anterior es optimista. Aquí cada canal se evalúa con la combinación
+de la rejilla (`r params$rejilla`, `r if (tiene_cv) nrow(rejillas) / n_canales else 0` combinaciones de `Td`, `Tn`
+y `M`, sobre el mismo encaje) que mejor ARI medio da en los **otros** `r n_canales - 1` canales. La propagación de
+dev no tiene parámetros ajustados a estos datos y se compara tal cual.
+
+```{r}
+if (tiene_cv) {
+  cv %>%
+    transmute(Canal = canal, `Td, Tn, M elegidos sin el canal` = paste(td, tn, m, sep = ", "),
+              `EROLSC validación cruzada` = num(ari_cv, 3), `EROLSC por defecto` = num(ari_defecto, 3),
+              `Propagación (dev)` = num(ari_dev, 3), `UMAP + HDBSCAN` = num(ari_hdbscan, 3)) %>%
+    knitr::kable()
+} else cat("No hay rejillas (", params$rejilla, ") en todos los canales; corre examples/sonda_de_erolsc.rs.")
+```
+
+```{r}
+if (tiene_cv) {
+  tibble(`Comparación (ARI contra la verdad)` = c("EROLSC (validación cruzada) frente a propagación (dev)",
+                                                  "EROLSC (validación cruzada) frente a UMAP + HDBSCAN"),
+         `Diferencia media` = num(c(mean(dif_cv), mean(dif_hdb)), 3),
+         `IC 95 % bootstrap` = c(paste0("[", num(ic_cv[1], 3), ", ", num(ic_cv[2], 3), "]"),
+                                 paste0("[", num(ic_hdb[1], 3), ", ", num(ic_hdb[2], 3), "]")),
+         `Canales en que EROLSC es mayor` = c(paste(sum(dif_cv > 0), "de", nrow(cv)), paste(sum(dif_hdb > 0), "de", nrow(cv))),
+         `Wilcoxon pareado, p` = c(p_fmt(p_cv), p_fmt(p_hdb))) %>%
+    knitr::kable()
+}
+```
+
+```{r}
+if (tiene_cv) {
+  cv %>%
+    select(canal, `EROLSC por defecto` = ari_defecto, `EROLSC validación cruzada` = ari_cv,
+           `Propagación (dev)` = ari_dev, `UMAP + HDBSCAN` = ari_hdbscan) %>%
+    pivot_longer(-canal, names_to = "metodo", values_to = "ari") %>%
+    mutate(metodo = factor(metodo, levels = c("EROLSC por defecto", "EROLSC validación cruzada",
+                                              "Propagación (dev)", "UMAP + HDBSCAN"))) %>%
+    ggplot(aes(metodo, ari, group = canal)) +
+    geom_line(colour = "grey75") +
+    geom_point(aes(colour = metodo), size = 2) +
+    scale_colour_manual(values = c("EROLSC por defecto" = "#9ecae1", "EROLSC validación cruzada" = colores[["EROLSC"]],
+                                   "Propagación (dev)" = colores[["Propagación (dev)"]],
+                                   "UMAP + HDBSCAN" = colores[["UMAP + HDBSCAN"]]), guide = "none") +
+    labs(x = NULL, y = "ARI contra la verdad", title = "Fuera de muestra (cada línea es un canal)") +
+    theme(axis.text.x = element_text(angle = 15, hjust = 1))
+}
+```
+
+## Tamaño de la ventana
+
+La ventana se barrió con una rejilla reducida de `Td`, `Tn` y `M` (`r params$rejilla_ventana`). Para cada tamaño,
+el ARI de cada canal es el de la combinación que mejor ARI medio da en los otros canales (validación cruzada).
+La rejilla reducida está centrada en los valores que ya funcionaban, así que los valores absolutos son algo
+optimistas; la comparación entre ventanas es justa.
+
+```{r}
+rv <- bind_rows(lapply(sort(dirs), function(dir) {
+  f <- file.path(dir, params$rejilla_ventana)
+  if (!file.exists(f)) return(NULL)
+  read_csv(f, show_col_types = FALSE, progress = FALSE) %>% mutate(canal = basename(dir))
+}))
+tiene_ventanas <- nrow(rv) > 0 && n_distinct(rv$canal) == n_canales
+if (tiene_ventanas) {
+  cv_v <- bind_rows(lapply(sort(unique(rv$ventana)), function(v) {
+    r <- rv %>% filter(ventana == v)
+    bind_rows(lapply(sort(unique(r$canal)), function(cn) {
+      elegido <- r %>% filter(canal != cn) %>% group_by(td, tn, m) %>%
+        summarise(a = mean(ari), n = n(), .groups = "drop") %>% filter(n == n_canales - 1) %>%
+        arrange(desc(a)) %>% slice(1)
+      fila <- r %>% filter(canal == cn) %>% semi_join(elegido, by = c("td", "tn", "m"))
+      tibble(ventana = v, canal = cn, ari = fila$ari, ruido = fila$ruido, segundos = fila$segundos)
+    }))
+  })) %>% left_join(ari_de("Propagación (dev)") %>% rename(ari_dev = ari), by = "canal")
+  cv_v %>% group_by(Ventana = ventana) %>%
+    summarise(`ARI medio (validación cruzada)` = num(mean(ari), 3), `ARI mediano` = num(median(ari), 3),
+              `Diferencia con dev` = num(mean(ari - ari_dev), 3),
+              `Canales en que supera a dev` = paste(sum(ari > ari_dev), "de", n()),
+              `Anomalías` = pct(mean(ruido)), `Segundos por canal` = num(mean(segundos), 1), .groups = "drop") %>%
+    knitr::kable()
+} else cat("No hay barrido de ventanas (", params$rejilla_ventana, ") en todos los canales.")
+```
+
+```{r}
+if (tiene_ventanas) {
+  cv_v %>%
+    ggplot(aes(factor(ventana), ari, group = canal)) +
+    geom_line(colour = "grey80") +
+    geom_point(colour = colores[["EROLSC"]], size = 1.8) +
+    stat_summary(aes(group = 1), fun = mean, geom = "line", colour = "black", linewidth = 1) +
+    geom_hline(yintercept = mean(cv_v$ari_dev[cv_v$ventana == min(cv_v$ventana)]), linetype = "dashed",
+               colour = colores[["Propagación (dev)"]]) +
+    labs(x = "Ventana (espigas)", y = "ARI contra la verdad (validación cruzada)",
+         title = "Cada línea gris es un canal; la negra, la media",
+         subtitle = "Discontinua: ARI medio de la propagación de dev sobre el mismo encaje")
+}
+```
+
+## Otras semillas de UMAP
+
+Cada semilla entrena otro UMAP paramétrico con las mismas 2000 espigas; con una misma semilla, los dos agrupadores
+corren sobre el mismo encaje. Esto separa lo que se debe al agrupador de lo que se debe al encaje que tocó.
+EROLSC usa aquí sus parámetros por defecto (optimistas, ver la sección anterior).
+
+```{r}
+if (tiene_semillas) {
+  por_semilla %>%
+    group_by(Semilla = semilla) %>%
+    summarise(`EROLSC, ARI medio` = num(mean(EROLSC), 3), `Propagación (dev), ARI medio` = num(mean(`Propagación (dev)`), 3),
+              `Canales en que EROLSC es mayor` = paste(sum(EROLSC > `Propagación (dev)`), "de", n()), .groups = "drop") %>%
+    knitr::kable()
+} else cat("Sólo hay etiquetas de una semilla; corre scripts/etiqueta_erolsc.sh y la CLI de dev con otras semillas.")
+```
+
+```{r, fig.height = 5}
+if (tiene_semillas) {
+  por_semilla %>%
+    ggplot(aes(`Propagación (dev)`, EROLSC, colour = factor(semilla))) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(aes(group = canal), colour = "grey85") +
+    geom_point(size = 2) +
+    coord_equal(xlim = c(0, 0.7), ylim = c(0, 0.7)) +
+    labs(x = "ARI de la propagación (dev)", y = "ARI de EROLSC", colour = "Semilla",
+         title = "Cada punto es un canal con una semilla; las líneas unen las semillas de un canal",
+         subtitle = "Sobre la diagonal, EROLSC acierta más") +
+    theme(legend.position = "bottom")
+}
+```
+
 ## Parecerse a HDBSCAN frente a acertar
 
 Para cada canal y método en línea, el ARI contra UMAP + HDBSCAN (eje x) y contra la verdad (eje y). Si parecerse a
@@ -445,17 +686,19 @@ res %>%
 
 # Notas para interpretar
 
-- **Mismo UMAP, otro agrupador.** Los dos métodos en línea parten del mismo UMAP paramétrico con la misma
-  configuración, pero cada corrida entrena su propia red: los encajes no son idénticos punto a punto, y parte de la
-  diferencia en un canal puede venir del encaje y no del agrupador.
+- **Mismo encaje, otro agrupador.** Con la semilla 9999 los dos métodos agrupan exactamente el mismo encaje; las
+  diferencias de la semilla 9999 son del agrupador. Otro encaje (otra semilla) cambia los dos resultados, a veces
+  mucho: por eso la sección de semillas.
 - **En línea frente a offline.** EROLSC y la propagación etiquetan cada espiga con lo visto hasta ese momento;
   UMAP + HDBSCAN ve todo el canal a la vez. Tomarlo como referencia mide cuánto se acerca un método en línea al
   procedimiento offline usual, no cuánto acierta.
-- **Ruido.** HDBSCAN deja como ruido las espigas que no agrupa (esas espigas no se evalúan en la sección 3.1);
-  EROLSC deja como anomalía las que caen a más de `Td` = 2.5 de toda gaussiana (≈ 8 %); la propagación asigna
+- **Ruido.** HDBSCAN deja como ruido las espigas que no agrupa (esas espigas no se evalúan en «Contra UMAP + HDBSCAN»);
+  EROLSC deja como anomalía las que caen a más de `Td` = 2.25 de toda gaussiana (≈ 13 %); la propagación asigna
   casi todas.
-- **Calibración de EROLSC.** Sus parámetros (`Td` 2.5, `Tn` 0.5, `M` 50) se eligieron con
-  `examples/sonda_de_erolsc.rs` sobre estos mismos 16 canales y contra esta misma verdad, así que su ventaja aquí
-  es optimista: habría que confirmarla en otro registro.
+- **Calibración de EROLSC.** Sus parámetros por defecto (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con
+  `examples/sonda_de_erolsc.rs` sobre estos mismos 16 canales y contra esta misma verdad. Todo resultado de EROLSC
+  con esos parámetros (secciones «Contra UMAP + HDBSCAN», «Contra la verdad de campo», «Otras semillas» y las
+  gráficas) es optimista; la medida honesta es la de la validación cruzada. Aun ésta reutiliza el mismo registro:
+  falta confirmar en uno independiente.
 - **Un canal de un registro multicanal.** Dos neuronas pueden ser indistinguibles en un canal aislado para
   cualquier método; los valores absolutos miden también la dificultad del escenario.

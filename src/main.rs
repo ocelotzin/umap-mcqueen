@@ -24,6 +24,9 @@ use normaliza::{Normalizador, NormalizadorDeEntrada};
 //de órdenes (ver `Opciones`), con estos valores por defecto.
 const TRAIN_SIZE: usize = 400;
 const BATCH_SIZE: usize = 200;
+//Semilla por defecto del entrenamiento: el valor que fast-umap pasaba siempre al
+//backend, y el mismo que usa la rama dev.
+const DEFAULT_SEED: u64 = 9999;
 
 //Backend de la red neuronal, ncesito ver si esto puede ser optimizable
 type MyBackend = burn::backend::wgpu::CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -46,6 +49,10 @@ struct Opciones {
     ventana: usize,
     /// CSV donde escribir la etiqueta de cada forma de onda.
     etiquetas: Option<String>,
+    /// CSV donde escribir el encaje normalizado de cada forma de onda.
+    encaje: Option<String>,
+    /// Semilla de todos los generadores del entrenamiento.
+    semilla: u64,
 }
 
 const USO: &str = "\
@@ -55,10 +62,16 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --cargar          carga el modelo de --modelo en vez de entrenar
   --train <n>       formas de onda de entrenamiento (por defecto 400)
   --lote <n>        tamaño de lote (por defecto 200)
-  --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 1000)
+  --semilla <n>     semilla del entrenamiento: con los mismos datos y la misma
+                    semilla salen los mismos pesos (por defecto 9999). Se guarda
+                    en el manifiesto del modelo
+  --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 4000)
   --etiquetas <ruta> escribe en <ruta> la etiqueta EROLSC de cada forma de onda, una
                     por línea y en el orden del CSV (−1 = anomalía), incluidas las de
                     entrenamiento, que se agrupan primero
+  --encaje <ruta>   escribe en <ruta> el encaje normalizado de cada forma de onda
+                    (cabecera dim1,dim2), en el orden del CSV e incluidas las de
+                    entrenamiento: el encaje sobre el que agrupa EROLSC
 ";
 
 fn opciones() -> Result<Opciones, Box<dyn Error>> {
@@ -71,6 +84,8 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         cargar: false,
         ventana: erolsc::VENTANA,
         etiquetas: None,
+        encaje: None,
+        semilla: DEFAULT_SEED,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -78,6 +93,8 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--cargar" => o.cargar = true,
             "--train" => o.train_size = args.next().ok_or("--train necesita un número")?.parse()?,
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
+            "--semilla" => o.semilla = args.next().ok_or("--semilla necesita un número natural")?.parse()?,
+            "--encaje" => o.encaje = Some(args.next().ok_or("--encaje necesita una ruta")?),
             "--etiquetas" => o.etiquetas = Some(args.next().ok_or("--etiquetas necesita una ruta")?),
             "--ventana" => o.ventana = args.next().ok_or("--ventana necesita un número")?.parse()?,
             "-h" | "--help" => {
@@ -113,10 +130,15 @@ fn fila_de(registro: &csv::StringRecord) -> Result<Vec<f64>, Box<dyn Error>> {
 }
 
 /// La configuración de UMAP, en un sitio, para que entrenar y cargar usen la misma.
-fn configuracion() -> UmapConfig {
+//La semilla entra aquí porque es parte de la configuración del entrenamiento
+//(`UmapConfig::seed`): siembra la inicialización de la red y el muestreo de
+//aristas de cada época. Misma configuración, mismos datos y misma semilla dan
+//los mismos pesos; el manifiesto la guarda para que se sepa cuál fue.
+fn configuracion(semilla: u64) -> UmapConfig {
     UmapConfig {
         n_components: 2,
         hidden_sizes: vec![128],
+        seed: semilla,
         graph: GraphParams {
             n_neighbors: 15,
             metric: Metric::Euclidean,
@@ -149,7 +171,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
 
-    let config = configuracion();
+    let config = configuracion(opts.semilla);
 
     //EROLSC: se inicializa con los primeros `ventana` puntos del encaje y luego
     //sus gaussianas se estiman siempre sobre los últimos `ventana` puntos.
@@ -191,9 +213,13 @@ fn corre() -> Result<(), Box<dyn Error>> {
             Default::default(),
         )?;
         println!(
-            "Modelo cargado de {base}.bin — entrenado con {} vectores, huella {}…",
+            "Modelo cargado de {base}.bin — entrenado con {} vectores, huella {}…, semilla {}",
             manifiesto.n_entrenamiento,
-            &manifiesto.huella_datos[..12]
+            &manifiesto.huella_datos[..12],
+            manifiesto
+                .semilla
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "desconocida (manifiesto de formato 3)".into())
         );
         println!(
             "⚠ El encaje de entrenamiento NO se guarda: `embedding()` de un modelo \
@@ -212,6 +238,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
         )?;
         (m, norm, norm_entrada)
     } else {
+        println!("Semilla del entrenamiento: {}", opts.semilla);
         //Reducimos el encaje primario y a la par entrenamos
         let m = fast_umap::Umap::<MyAutodiffBackend>::new(config.clone()).fit(buffer_crudo.clone(), None); // UMAPEAR
         //La red se entrena sobre datos normalizados por caracteristica; hay que
@@ -311,7 +338,7 @@ fn corre() -> Result<(), Box<dyn Error>> {
 
     //Con --etiquetas, las formas de onda de entrenamiento también se agrupan, las
     //primeras, para que cada fila del CSV tenga su etiqueta.
-    if opts.etiquetas.is_some() {
+    if opts.etiquetas.is_some() || opts.encaje.is_some() {
         for (k, lote) in entrenamiento.chunks(opts.batch_size).enumerate() {
             let i = (k * opts.batch_size + lote.len()).saturating_sub(1);
             let e = procesa_lote(lote, i, &mut agrupador, &mut total_puntos)?;
@@ -344,6 +371,15 @@ fn corre() -> Result<(), Box<dyn Error>> {
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
     for (id, media, n) in agrupador.grupos() {
         println!("  grupo {id}: centro ({:.3}, {:.3}) · {n} puntos en la ventana", media[0], media[1]);
+    }
+
+    if let Some(ruta) = &opts.encaje {
+        let mut texto = String::from("dim1,dim2\n");
+        for (x, y) in &total_puntos {
+            texto.push_str(&format!("{x},{y}\n"));
+        }
+        std::fs::write(ruta, texto)?;
+        println!("{} puntos del encaje escritos en {ruta}", total_puntos.len());
     }
 
     if let Some(ruta) = &opts.etiquetas {

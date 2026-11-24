@@ -2,11 +2,21 @@
 //!
 //! Lee el encaje (`dim1,dim2`, con cabecera) y las etiquetas verdaderas (una
 //! por línea, sin cabecera), los pasa por EROLSC en lotes con una rejilla de
-//! parámetros y reporta, por combinación: grupos, fracción de ruido, ARI
-//! contra la verdad sin el ruido de EROLSC y ARI contando el ruido como un
-//! grupo más. Sólo cuentan las espigas posteriores a la ventana inicial.
+//! parámetros y escribe en la salida estándar un CSV con una fila por
+//! combinación: grupos, fracción de anomalías y ARI contra la verdad (las
+//! anomalías de EROLSC cuentan como una clase más).
 //!
-//!   cargo run --release --example sonda_de_erolsc -- encaje.csv labels.csv [lote=200]
+//! Las etiquetas se arman igual que con `umap-mcqueen --etiquetas`: todas las
+//! espigas, y las de la ventana inicial con la etiqueta de la inicialización.
+//! Así la fila de los parámetros por defecto, sobre el encaje de la CLI con la
+//! misma semilla, da el mismo ARI que `erolsc_labels.csv`.
+//!
+//! `comparacion_erolsc_dev_umap_hdbscan.Rmd` lee estas rejillas (una por canal,
+//! `erolsc_rejilla.csv`) para elegir los parámetros de cada canal con los demás
+//! canales: validación cruzada dejando un canal fuera.
+//!
+//!   cargo run --release --example sonda_de_erolsc -- encaje.csv labels.csv [lote=200] > erolsc_rejilla.csv
+//!   cargo run --release --example sonda_de_erolsc -- encaje.csv labels.csv 200 500,1000,2000 > erolsc_rejilla_ventana.csv
 
 #[path = "../src/erolsc.rs"]
 #[allow(dead_code)]
@@ -38,6 +48,29 @@ fn ari(a: &[i64], b: &[i64]) -> f64 {
     if maximo == esperado { 0.0 } else { (indice - esperado) / (maximo - esperado) }
 }
 
+/// Etiquetas de todas las espigas, como las escribe la CLI con `--etiquetas`.
+fn etiqueta(puntos: &[Vec<f64>], p: Parametros, lote: usize) -> Result<(Vec<i64>, usize), Box<dyn Error>> {
+    let mut e = Erolsc::new(p)?;
+    let mut todas: Vec<i64> = Vec::with_capacity(puntos.len());
+    for l in puntos.chunks(lote) {
+        todas.extend(e.actualiza_lote(l)?);
+        if e.inicializado() {
+            let base = todas.len() - e.n_ventana();
+            for (k, (_, et)) in e.ventana().enumerate() {
+                if todas[base + k] == SIN_CLASIFICAR {
+                    todas[base + k] = et;
+                }
+            }
+        }
+    }
+    for x in todas.iter_mut() {
+        if *x == SIN_CLASIFICAR {
+            *x = RUIDO;
+        }
+    }
+    Ok((todas, e.n_grupos()))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
@@ -57,57 +90,62 @@ fn main() -> Result<(), Box<dyn Error>> {
     if verdad.len() != puntos.len() {
         return Err(format!("{} puntos y {} etiquetas", puntos.len(), verdad.len()).into());
     }
-    println!("{} espigas, {} unidades verdaderas, lotes de {lote}", puntos.len(), {
-        let mut u = verdad.clone();
-        u.sort();
-        u.dedup();
-        u.len()
-    });
-    println!("{:>5} {:>5} {:>4} {:>6} {:>5} | {:>6} {:>7} {:>8} {:>9}", "Td", "Tn", "M", "fusion", "C", "grupos", "ruido%", "ARI_sin", "ARI_todo");
 
-    let rejilla_td = [2.0, 2.25, 2.5];
-    let rejilla_tn = [0.2, 0.4, 0.5, 0.6, 0.7];
-    let rejilla_m = [50usize, 75, 100];
-    let rejilla_f = [1.0];
-    let rejilla_c = [10usize];
-    for &td in &rejilla_td {
-        for &tn in &rejilla_tn {
-            for &m in &rejilla_m {
-                for &f in &rejilla_f {
-                    for &c in &rejilla_c {
-                        let p = Parametros {
-                            umbral_distancia: td,
-                            umbral_pertenencia: tn,
-                            min_puntos: m,
-                            factor_fusion: f,
-                            c_inicial: c,
-                            c_anomalias: c,
-                            ..Default::default()
-                        };
-                        let mut e = Erolsc::new(p)?;
-                        let mut et = Vec::with_capacity(puntos.len());
-                        for l in puntos.chunks(lote) {
-                            et.extend(e.actualiza_lote(l)?);
-                        }
-                        let validos: Vec<usize> = (0..et.len()).filter(|&i| et[i] != SIN_CLASIFICAR).collect();
-                        let ruido = validos.iter().filter(|&&i| et[i] == RUIDO).count();
-                        let (mut a1, mut b1) = (Vec::new(), Vec::new());
-                        for &i in &validos {
-                            if et[i] != RUIDO {
-                                a1.push(et[i]);
-                                b1.push(verdad[i]);
-                            }
-                        }
-                        let a2: Vec<i64> = validos.iter().map(|&i| et[i]).collect();
-                        let b2: Vec<i64> = validos.iter().map(|&i| verdad[i]).collect();
-                        println!(
-                            "{td:>5} {tn:>5} {m:>4} {f:>6} {c:>5} | {:>6} {:>7.1} {:>8.3} {:>9.3}",
-                            e.n_grupos(),
-                            100.0 * ruido as f64 / validos.len() as f64,
-                            ari(&a1, &b1),
-                            ari(&a2, &b2)
-                        );
+    //Con un cuarto argumento (lista de ventanas, p. ej. 500,1000,2000) la rejilla
+    //barre también el tamaño de la ventana, alrededor de los valores buenos de
+    //Td, Tn y M, y la salida lleva una columna `ventana`.
+    let ventanas: Option<Vec<usize>> = args
+        .get(3)
+        .map(|s| s.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>())
+        .transpose()?;
+    let (td_def, tn_def, m_def): (Vec<f64>, Vec<f64>, Vec<usize>) = if ventanas.is_some() {
+        (vec![2.25, 2.5], vec![0.4, 0.5, 0.6], vec![50, 100, 200])
+    } else {
+        (vec![2.0, 2.25, 2.5, 3.0, 3.5], vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], vec![20, 50, 100, 200, 400])
+    };
+    //Las rejillas se pueden cambiar sin recompilar: SONDA_TD, SONDA_TN y SONDA_M,
+    //listas separadas por comas.
+    fn de_entorno<T: std::str::FromStr>(var: &str, defecto: Vec<T>) -> Result<Vec<T>, Box<dyn Error>> {
+        match std::env::var(var) {
+            Ok(s) => s
+                .split(',')
+                .map(|v| v.trim().parse::<T>().map_err(|_| format!("{var}: «{v}» no es válido").into()))
+                .collect(),
+            Err(_) => Ok(defecto),
+        }
+    }
+    let rej_td = de_entorno("SONDA_TD", td_def)?;
+    let rej_tn = de_entorno("SONDA_TN", tn_def)?;
+    let rej_m = de_entorno("SONDA_M", m_def)?;
+    let lista_v = ventanas.clone().unwrap_or_else(|| vec![Parametros::default().ventana]);
+
+    if ventanas.is_some() {
+        print!("ventana,");
+    }
+    println!("td,tn,m,fusion,c,grupos,ruido,ari,segundos");
+    for &v in &lista_v {
+        for &td in &rej_td {
+            for &tn in &rej_tn {
+                for &m in &rej_m {
+                    if m >= v {
+                        continue;
                     }
+                    let p = Parametros {
+                        ventana: v,
+                        umbral_distancia: td,
+                        umbral_pertenencia: tn,
+                        min_puntos: m,
+                        ..Default::default()
+                    };
+                    let (f, c) = (p.factor_fusion, p.c_inicial);
+                    let t0 = std::time::Instant::now();
+                    let (et, grupos) = etiqueta(&puntos, p, lote)?;
+                    let seg = t0.elapsed().as_secs_f64();
+                    let ruido = et.iter().filter(|&&x| x == RUIDO).count() as f64 / et.len() as f64;
+                    if ventanas.is_some() {
+                        print!("{v},");
+                    }
+                    println!("{td},{tn},{m},{f},{c},{grupos},{ruido:.5},{:.6},{seg:.2}", ari(&et, &verdad));
                 }
             }
         }

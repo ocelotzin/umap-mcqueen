@@ -202,10 +202,12 @@ Comparar, sobre los mismos datos con verdad de campo, cuatro etiquetados de las 
 
 - **Verdad de campo** (`r params$verdad`).
 - **umap-mcqueen (EROLSC)**: la versión de la rama `erolsc`. UMAP paramétrico y, sobre el encaje, EROLSC
-  (*Extended Robust On-Line Streaming Clustering*, Ibrahim, Du y Keller, 2018) con una ventana movible de 1000
+  (*Extended Robust On-Line Streaming Clustering*, Ibrahim, Du y Keller, 2018) con una ventana movible de 4000
   espigas: PCM para inicializar, gaussianas actualizadas por distancia de Mahalanobis, y un historial de anomalías
   del que nacen grupos nuevos. Etiquetas escritas por la propia CLI con `--etiquetas` (`r params$mcqueen`,
-  generadas con `scripts/etiqueta_erolsc.sh`: UMAP entrenado con las primeras 2000 espigas de cada canal, lotes de 200).
+  generadas con `scripts/etiqueta_erolsc.sh`: UMAP entrenado con las primeras 2000 espigas de cada canal, semilla
+  9999, lotes de 200). Con esa semilla el encaje es idéntico al del umap-mcqueen de la rama dev, así que la diferencia
+  con el informe de dev es sólo el agrupador.
 - **UMAP + HDBSCAN offline**: UMAP no paramétrico (paquete `uwot`) sobre las formas de onda estandarizadas y HDBSCAN
   (paquete `dbscan`) sobre el encaje, viendo todo el canal a la vez (sección 5).
 - **PCA + HDBSCAN offline**: tres componentes principales de las formas de onda y HDBSCAN.
@@ -397,7 +399,7 @@ res %>%
 # Notas para interpretar
 
 - **umap-mcqueen (EROLSC) es en línea**: etiqueta cada espiga con lo visto hasta ese momento, en lotes y en orden
-  (las primeras 1000, las de la ventana inicial, reciben la etiqueta de la inicialización). Los dos
+  (las primeras 4000, las de la ventana inicial, reciben la etiqueta de la inicialización). Los dos
   métodos offline ven todo el canal de una vez, una ventaja que no tendrían en tiempo real.
 - **Parámetros de los métodos offline.** UMAP se calcula con todas las espigas (15 vecinos, `min_dist` 0.1, semilla
   fija). HDBSCAN corre sobre una muestra regular de `r params$muestra` espigas, con `minPts` =
@@ -406,9 +408,14 @@ res %>%
   canales completos. Otros valores darían otros resultados; para recalcularlos, borra en cada canal
   los archivos `*_hdbscan_labels.csv`, `umap_encaje.csv` y `pca_encaje.csv`.
 - **Política de ruido.** HDBSCAN deja como ruido las espigas que no agrupa; EROLSC deja como anomalía las que caen
-  a más de `Td` = 2.5 (distancia de Mahalanobis) de toda gaussiana, del orden del 8 % de las espigas. En datos
+  a más de `Td` = 2.25 (distancia de Mahalanobis) de toda gaussiana, del orden del 13 % de las espigas. En datos
   donde todas las espigas pertenecen a alguna neurona, descartar espigas baja el recall y, con él, la exactitud.
 - **Un canal de un registro multicanal.** Si la verdad se definió con todos los canales, dos neuronas pueden ser
   indistinguibles en un canal aislado para cualquier método. La comparación entre métodos sigue siendo válida; los
   valores absolutos miden también la dificultad del escenario.
 - **Pares neurona-canal.** Una neurona visible en varios canales se cuenta en cada uno.
+- **Los parámetros de EROLSC salen de estos mismos datos.** La ventana de 4000 y `Td` 2.25, `Tn` 0.5 y `M` 200 se
+  eligieron con `examples/sonda_de_erolsc.rs` sobre estos 16 canales y contra esta misma verdad, así que los
+  resultados de EROLSC de este informe son optimistas. `comparacion_erolsc_dev_umap_hdbscan.Rmd` mide cuánto se
+  sostiene fuera de muestra (validación cruzada dejando un canal fuera), con otras semillas de UMAP y con otros
+  tamaños de ventana. Todo sale de un solo registro.

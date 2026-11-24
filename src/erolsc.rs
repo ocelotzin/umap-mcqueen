@@ -1,6 +1,6 @@
 //! **EROLSC** — *Extended Robust On-Line Streaming Clustering* (Ibrahim, Du y
 //! Keller, IPMU 2018, CCIS 853, pp. 467–478), aplicado sobre el encaje UMAP con
-//! una **ventana movible** de `ventana` puntos (por defecto 1000).
+//! una **ventana movible** de `ventana` puntos (por defecto 4000).
 //!
 //! # El algoritmo del artículo (Fig. 1)
 //!
@@ -69,7 +69,7 @@ pub const RUIDO: i64 = -1;
 pub const SIN_CLASIFICAR: i64 = -2;
 
 /// Tamaño por defecto de la ventana movible, `S` en el artículo.
-pub const VENTANA: usize = 1000;
+pub const VENTANA: usize = 4000;
 
 #[derive(Clone, Debug)]
 pub struct Parametros {
@@ -77,8 +77,8 @@ pub struct Parametros {
     pub ventana: usize,
     /// `M`: puntos mínimos para que un grupo sea gaussiana.
     pub min_puntos: usize,
-    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 2.5 deja
-    /// fuera ≈ 4 % de una gaussiana (χ²₂ = 6.25).
+    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 2.25 deja
+    /// fuera ≈ 8 % de una gaussiana (χ²₂ = 5.06).
     pub umbral_distancia: f64,
     /// `Tn`: pertenencia posibilística mínima a algún grupo para no ser anomalía.
     pub umbral_pertenencia: f64,
@@ -96,28 +96,33 @@ pub struct Parametros {
 
 /// Valores calibrados con `examples/sonda_de_erolsc.rs` sobre los encajes de
 /// los 16 canales de `monocanal` (híbrido de Janelia con deriva, 5–11 unidades
-/// por canal), contra las etiquetas verdaderas, con ventana 1000 y lotes de 200.
-/// ARI contando el ruido de EROLSC como un grupo más:
+/// por canal; encaje de UMAP con semilla 9999, el mismo que usa la rama dev),
+/// contra las etiquetas verdaderas, con lotes de 200. ARI contando las
+/// anomalías de EROLSC como una clase más; «validación cruzada» = cada canal
+/// evaluado con los `Td`, `Tn` y `M` que mejor ARI medio dan en los otros 15.
 ///
-/// | Td  | Tn  | M  | ARI medio | ARI peor canal | grupos (mediana) | ruido |
-/// |-----|-----|----|-----------|----------------|------------------|-------|
-/// | 3.0 | 0.1 | 20 | 0.127     | 0.002          | 4                | 3 %   |
-/// | 2.5 | 0.5 | 50 | 0.252     | 0.012          | 4                | 7.5 % |
-/// | 2.0 | 0.6 | 50 | 0.248     | 0.119          | 7                | 16 %  |
+/// | Ventana | Td   | Tn  | M   | ARI medio | Validación cruzada | Anomalías |
+/// |---------|------|-----|-----|-----------|--------------------|-----------|
+/// | 1000    | 3.0  | 0.1 | 20  | 0.127     | —                  | 3 %       |
+/// | 1000    | 2.5  | 0.5 | 50  | 0.252     | 0.188–0.234        | 8 %       |
+/// | 2000    | 2.5  | 0.6 | 50  | 0.305     | 0.279              | 9 %       |
+/// | 4000    | 2.25 | 0.5 | 200 | 0.315     | 0.302              | 13 %      |
+/// | 8000    | 2.5  | 0.6 | 200 | 0.295     | 0.295              | 13 %      |
 ///
-/// La primera fila son los valores de partida; la segunda, éstos (mejor media y
-/// menos ruido); la tercera, la alternativa con mejor peor canal a cambio del
-/// doble de ruido. En los mismos canales el agrupador de `dev` da ARI medio
-/// 0.171 y PCA + HDBSCAN offline 0.100. La rejilla es plana entre 0.24 y 0.25;
-/// `factor_fusion` y `C` casi no movieron el resultado. Las unidades de un
-/// canal se solapan en el encaje 2D, así que ningún agrupador sobre él las
-/// separa todas.
+/// La primera fila son los valores de partida; las demás, lo mejor de cada
+/// ventana (para 1000, la validación cruzada da 0.188 con la rejilla amplia y
+/// 0.234 con la reducida alrededor del óptimo). Con la ventana 4000 la
+/// validación cruzada elige la misma combinación en 14 de 16 canales, y `M`
+/// queda en el interior de la rejilla (100: 0.304, 400: 0.280, 800: 0.178).
+/// En los mismos canales y el mismo encaje, el agrupador de `dev` da ARI medio
+/// 0.171. Agrupar un canal entero (~50 000 espigas) tarda menos de un segundo
+/// con 4000. Todo sale de un solo registro: falta confirmarlo en otro.
 impl Default for Parametros {
     fn default() -> Self {
         Parametros {
             ventana: VENTANA,
-            min_puntos: 50,
-            umbral_distancia: 2.5,
+            min_puntos: 200,
+            umbral_distancia: 2.25,
             umbral_pertenencia: 0.5,
             c_inicial: 10,
             c_anomalias: 10,
@@ -735,6 +740,19 @@ impl Rng {
 mod pruebas {
     use super::*;
 
+    /// Parámetros fijos de las pruebas del algoritmo: no dependen de la
+    /// calibración (que cambia los valores por defecto), sino de lo que se
+    /// prueba. Ventana de 1000 para que los datos sintéticos la llenen.
+    fn prueba() -> Parametros {
+        Parametros {
+            ventana: 1000,
+            min_puntos: 50,
+            umbral_distancia: 2.5,
+            umbral_pertenencia: 0.5,
+            ..Default::default()
+        }
+    }
+
     fn normal(rng: &mut Rng) -> f64 {
         let u1 = rng.uniforme().max(1e-300);
         let u2 = rng.uniforme();
@@ -795,7 +813,7 @@ mod pruebas {
     #[test]
     fn una_sola_nube_estable_no_se_encoge_ni_se_parte() {
         let mut rng = Rng::new(23);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         for _ in 0..50 {
             e.actualiza_lote(&nube(&mut rng, (0.5, 0.5), 0.03, 200)).unwrap();
         }
@@ -805,8 +823,9 @@ mod pruebas {
     }
 
     #[test]
-    fn la_ventana_por_defecto_es_1000() {
-        assert_eq!(Parametros::default().ventana, 1000);
+    fn la_ventana_por_defecto_es_4000() {
+        assert_eq!(Parametros::default().ventana, 4000);
+        assert!(Parametros::default().valida().is_ok());
     }
 
     #[test]
@@ -818,7 +837,7 @@ mod pruebas {
             nube(&mut rng, (0.4, 0.8), 0.02, 600),
         ];
         let datos = mezcla(&mut rng, &nubes);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         let mut etiquetas = Vec::new();
         for lote in datos.chunks(200) {
             let pts: Vec<Vec<f64>> = lote.iter().map(|p| p.0.clone()).collect();
@@ -844,7 +863,7 @@ mod pruebas {
     fn antes_de_llenar_la_ventana_no_clasifica() {
         let mut rng = Rng::new(3);
         let pts = nube(&mut rng, (0.5, 0.5), 0.02, 999);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         let et = e.actualiza_lote(&pts).unwrap();
         assert!(!e.inicializado());
         assert!(et.iter().all(|&x| x == SIN_CLASIFICAR));
@@ -853,7 +872,7 @@ mod pruebas {
     #[test]
     fn detecta_varias_estructuras_emergentes_a_la_vez() {
         let mut rng = Rng::new(11);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         //Arranque: un solo grupo.
         let inicial = nube(&mut rng, (0.2, 0.8), 0.02, 1000);
         e.actualiza_lote(&inicial).unwrap();
@@ -890,7 +909,7 @@ mod pruebas {
     #[test]
     fn las_anomalias_aisladas_quedan_como_ruido() {
         let mut rng = Rng::new(5);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         e.actualiza_lote(&nube(&mut rng, (0.3, 0.3), 0.02, 1000)).unwrap();
         let mut lote = nube(&mut rng, (0.3, 0.3), 0.02, 190);
         let lejanos: Vec<Vec<f64>> = (0..10)
@@ -905,7 +924,7 @@ mod pruebas {
     #[test]
     fn la_ventana_sigue_a_un_grupo_que_deriva() {
         let mut rng = Rng::new(13);
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        let mut e = Erolsc::new(prueba()).unwrap();
         //Una neurona que se mueve de x = 0.2 a x = 0.6, poco a poco.
         let pasos = 40;
         for k in 0..pasos {
@@ -929,7 +948,7 @@ mod pruebas {
         ];
         let pts: Vec<Vec<f64>> = mezcla(&mut rng, &nubes).into_iter().map(|p| p.0).collect();
         let corre = || {
-            let mut e = Erolsc::new(Parametros::default()).unwrap();
+            let mut e = Erolsc::new(prueba()).unwrap();
             pts.chunks(200).flat_map(|l| e.actualiza_lote(l).unwrap()).collect::<Vec<_>>()
         };
         assert_eq!(corre(), corre());
@@ -938,8 +957,8 @@ mod pruebas {
     #[test]
     fn rechaza_parametros_y_dimensiones_invalidas() {
         assert!(Erolsc::new(Parametros { ventana: 0, ..Default::default() }).is_err());
-        assert!(Erolsc::new(Parametros { min_puntos: 1000, ..Default::default() }).is_err());
-        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        assert!(Erolsc::new(Parametros { min_puntos: 1000, ..prueba() }).is_err());
+        let mut e = Erolsc::new(prueba()).unwrap();
         e.actualiza_lote(&[vec![0.0, 0.0]]).unwrap();
         assert!(e.actualiza_lote(&[vec![0.0, 0.0, 0.0]]).is_err());
     }
