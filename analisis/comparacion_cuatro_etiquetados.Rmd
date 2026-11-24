@@ -10,7 +10,7 @@ output:
     theme: readable
     code_folding: hide
 params:
-  carpeta: "../umap-mcqueen-actual-trabaj/data/monocanal"  # carpeta con una subcarpeta por canal
+  carpeta: "../data/monocanal"         # carpeta con una subcarpeta por canal (relativa a analisis/)
   formas: "spikes.csv"                 # formas de onda, una fila por espiga
   verdad: "labels.csv"                 # etiquetas verdaderas
   mcqueen: "erolsc_labels.csv"         # etiquetas de umap-mcqueen con EROLSC (scripts/etiqueta_erolsc.sh)

@@ -1,2 +1,9 @@
 /target
-data/Waveforms.csv
+# Datos (registros, etiquetas, encajes y referencias): pesan GB y se regeneran (ver README)
+/data/
+# Informes generados por los Rmd de analisis/, y material de referencia
+/reportes/
+# Restos de herramientas
+.Rhistory
+*.swp
+__pycache__/
