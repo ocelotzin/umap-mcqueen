@@ -18,7 +18,7 @@ params:
   rejilla: "erolsc_rejilla.csv"        # rejilla de EROLSC por canal (examples/sonda_de_erolsc.rs), para la validación cruzada
   rejilla_ventana: "erolsc_rejilla_ventana.csv"  # rejilla que barre también el tamaño de la ventana
   semillas: "1,2,3"                    # otras semillas de UMAP (archivos <etiquetas>_s<semilla>.csv), además de 9999
-  fuera_de_muestra: false              # true: datos que no se usaron para calibrar EROLSC (p. ej. simulados con MEArec)
+  fuera_de_muestra: true               # false sólo con los datos con que se calibró EROLSC (data/mearec, semilla 1)
   min_verdad: 50                       # neuronas (o unidades de referencia) con menos espigas no se evalúan
   umbral: 0.8                          # exactitud para contar una neurona como recuperada
   min_pts: 0                           # HDBSCAN: 0 = automático (0.5 % de la muestra, entre 10 y 200)
@@ -281,8 +281,8 @@ Comparar los dos agrupadores en línea de umap-mcqueen entre sí, tomando **UMAP
 referencia:
 
 - **EROLSC** (rama `erolsc`): *Extended Robust On-Line Streaming Clustering* (Ibrahim, Du y Keller, 2018) sobre el
-  encaje del UMAP paramétrico, con una ventana movible de 4000 espigas. PCM inicializa; cada espiga entra a la
-  gaussiana más cercana por distancia de Mahalanobis si está a menos de `Td` = 2.25, y si no va al historial de
+  encaje del UMAP paramétrico, con una ventana movible de 2000 espigas. PCM inicializa; cada espiga entra a la
+  gaussiana más cercana por distancia de Mahalanobis si está a menos de `Td` = 4.5, y si no va al historial de
   anomalías, del que nacen grupos nuevos (`r params$erolsc`, de `scripts/etiqueta_erolsc.sh`).
 - **Propagación (dev)** (rama `dev`): propagación de etiquetas por vecindad sobre una ventana de espigas
   recientes, con nacimientos y auditorías por HDBSCAN (`r params$dev`, de `scripts/etiqueta_carpeta.py`).
@@ -309,7 +309,7 @@ lado.
 p_txt <- function(p) { f <- p_fmt(p); if (startsWith(f, "<")) paste("p", f) else paste("p =", f) }
 if (tiene_cv) {
   cat(sprintf(paste0(
-    "- **Fuera de muestra, %s** Con los parámetros ",
+    "- **Recalibrado en estos datos (validación cruzada): %s** Con los parámetros ",
     "elegidos sin el canal evaluado, su ARI medio es %s frente a %s de la propagación, sobre el mismo encaje. ",
     "La diferencia media es %s (IC 95 %% bootstrap [%s, %s]; Wilcoxon pareado %s; EROLSC es mayor en %d de %d ",
     "canales).\n"),
@@ -319,10 +319,10 @@ if (tiene_cv) {
     num(mean(cv$ari_cv), 3), num(mean(cv$ari_dev), 3), num(mean(dif_cv), 3), num(ic_cv[1], 3), num(ic_cv[2], 3),
     p_txt(p_cv), sum(dif_cv > 0), nrow(cv)))
   cat(sprintf(paste0(
-    "- **Los parámetros por defecto son optimistas.** Elegidos con estos mismos canales, dan ARI medio %s; ",
-    "fuera de muestra, %s.\n"), num(mean(cv$ari_defecto), 3), num(mean(cv$ari_cv), 3)))
+    "- **Parámetros por defecto frente a recalibrar aquí:** ARI medio %s con los por defecto, %s recalibrando ",
+    "con validación cruzada.\n"), num(mean(cv$ari_defecto), 3), num(mean(cv$ari_cv), 3)))
   cat(sprintf(paste0(
-    "- **Frente a UMAP + HDBSCAN offline** (ARI medio %s) la diferencia de EROLSC fuera de muestra es %s ",
+    "- **Frente a UMAP + HDBSCAN offline** (ARI medio %s) la diferencia de EROLSC recalibrado aquí es %s ",
     "(IC 95 %% [%s, %s]; %s), y HDBSCAN recupera más neuronas con exactitud ≥ %s (%d contra %d).\n"),
     num(mean(cv$ari_hdbscan), 3), num(mean(dif_hdb), 3), num(ic_hdb[1], 3), num(ic_hdb[2], 3), p_txt(p_hdb),
     params$umbral, sum(res$recuperadas[res$metodo == "UMAP + HDBSCAN"]), sum(res$recuperadas[res$metodo == "EROLSC"])))
@@ -330,13 +330,12 @@ if (tiene_cv) {
 if (tiene_semillas) {
   cat(sprintf(paste0(
     "- **Con %d semillas de UMAP** (%s), EROLSC supera a la propagación en %d de %d pares canal-semilla; la ",
-    "diferencia media por canal es %s (IC 95 %% [%s, %s]; Wilcoxon %s). Estas corridas usan los parámetros ",
-    "por defecto de EROLSC, así que heredan su optimismo.\n"),
+    "diferencia media por canal es %s (IC 95 %% [%s, %s]; Wilcoxon %s), con los parámetros por defecto.\n"),
     length(semillas_ok), paste(semillas_ok, collapse = ", "), gana_sem, nrow(por_semilla),
     num(mean(por_canal_sem$dif), 3), num(ic_sem[1], 3), num(ic_sem[2], 3), p_txt(p_sem)))
 }
-if (!tiene_cv) {
-  # Sin rejilla: los parámetros de EROLSC son los por defecto, congelados. Si los
+if (params$fuera_de_muestra || !tiene_cv) {
+  # Los parámetros de EROLSC por defecto, congelados. Si los
   # datos no se usaron para calibrarlos, esta comparación ya es fuera de muestra.
   a_e <- ari_de("EROLSC"); a_d <- ari_de("Propagación (dev)"); a_h <- ari_de("UMAP + HDBSCAN")
   d_dev <- a_e$ari - a_d$ari[match(a_e$canal, a_d$canal)]
@@ -350,8 +349,9 @@ if (!tiene_cv) {
             p_txt(wilcox.test(d, exact = FALSE)$p.value), sum(d > 0), length(d))
   }
   cat(sprintf(paste0(
-    "- **Con los parámetros de EROLSC congelados** (los calibrados en otros datos), su ARI medio es %s, frente a ",
+    "- **Con los parámetros de EROLSC congelados** (%s), su ARI medio es %s, frente a ",
     "%s de la propagación de dev y %s de UMAP + HDBSCAN. Diferencia con dev: %s. Diferencia con UMAP + HDBSCAN: %s.\n"),
+    if (params$fuera_de_muestra) "calibrados en otros datos" else "calibrados con estos mismos datos",
     num(mean(a_e$ari), 3), num(mean(a_d$ari), 3), num(mean(a_h$ari), 3), frase(d_dev), frase(d_hdb)))
   # Los canales de un mismo registro comparten neuronas: no son independientes.
   # La misma comparación con un valor por registro (media de sus canales).
@@ -373,12 +373,11 @@ if (!tiene_cv) {
 if (params$fuera_de_muestra) {
   cat(paste0(
     "- **Datos fuera de muestra.** Estos datos no se usaron para elegir los parámetros de EROLSC ni el tamaño de ",
-    "su ventana: es la prueba independiente que faltaba en el registro híbrido.\n"))
+    "su ventana (se calibraron con los registros simulados de semilla maestra 1).\n"))
 } else {
   cat(paste0(
-    "- **Falta un registro independiente.** Los canales son del mismo registro, y la calibración y la ",
-    "evaluación salen de ellos. Una ventaja de EROLSC sólo quedaría establecida en datos que no se usaron para ",
-    "elegir sus parámetros.\n"))
+    "- **Datos de calibración.** Con estos datos se eligieron los parámetros de EROLSC: sus resultados aquí son ",
+    "optimistas. La prueba honesta está en los datos que no se usaron para elegirlos.\n"))
 }
 ```
 
@@ -510,8 +509,9 @@ neu %>%
 
 ## Validación cruzada: parámetros elegidos sin el canal evaluado
 
-Los parámetros por defecto de EROLSC (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con los 16 canales del
-registro híbrido de `monocanal` y contra su verdad. `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos, así que aquí no hay sesgo de calibración." else "Son los datos de este informe: los resultados de EROLSC con esos parámetros son optimistas."` Aquí cada canal se evalúa con la combinación
+Los parámetros por defecto de EROLSC (ventana 2000, `Td` 4.5, `Tn` 0.3, `M` 100) se eligieron con los registros simulados con MEArec de semilla maestra 1 (`data/mearec`, `scripts/simula_monocanal_mearec.py`), contra su verdad.
+`r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos: los resultados de EROLSC de este informe no tienen sesgo de calibración." else "Son los datos con los que se calibraron: los resultados de EROLSC de este informe son optimistas."` Esta sección pregunta otra cosa:
+cuánto daría EROLSC si se recalibrara con ESTOS datos, sin mirar el canal evaluado. Cada canal se evalúa con la combinación
 de la rejilla (`r params$rejilla`, `r if (tiene_cv) nrow(rejillas) / n_canales else 0` combinaciones de `Td`, `Tn`
 y `M`, sobre el mismo encaje) que mejor ARI medio da en los **otros** `r n_canales - 1` canales. La propagación de
 dev no tiene parámetros ajustados a estos datos y se compara tal cual.
@@ -611,7 +611,7 @@ if (tiene_ventanas) {
 
 Cada semilla entrena otro UMAP paramétrico con las mismas 2000 espigas; con una misma semilla, los dos agrupadores
 corren sobre el mismo encaje. Esto separa lo que se debe al agrupador de lo que se debe al encaje que tocó.
-EROLSC usa aquí sus parámetros por defecto (optimistas, ver la sección anterior).
+EROLSC usa aquí sus parámetros por defecto.
 
 ```{r}
 if (tiene_semillas) {
@@ -739,10 +739,9 @@ res %>%
   UMAP + HDBSCAN ve todo el canal a la vez. Tomarlo como referencia mide cuánto se acerca un método en línea al
   procedimiento offline usual, no cuánto acierta.
 - **Ruido.** HDBSCAN deja como ruido las espigas que no agrupa (esas espigas no se evalúan en «Contra UMAP + HDBSCAN»);
-  EROLSC deja como anomalía las que caen a más de `Td` = 2.25 de toda gaussiana (≈ 13 %); la propagación asigna
+  EROLSC deja como anomalía las que caen a más de `Td` = 4.5 de toda gaussiana (≈ 1 %); la propagación asigna
   casi todas.
-- **Calibración de EROLSC.** Sus parámetros por defecto (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con
-  `examples/sonda_de_erolsc.rs` sobre los 16 canales del registro híbrido de `monocanal` y contra su verdad.
-  `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos: los resultados de EROLSC de este informe no tienen sesgo de calibración." else "Sobre esos mismos datos, todo resultado de EROLSC con esos parámetros es optimista; la medida honesta es la de la validación cruzada, que aun así reutiliza el mismo registro."`
+- **Calibración de EROLSC.** Sus parámetros por defecto (ventana 2000, `Td` 4.5, `Tn` 0.3, `M` 100) se eligieron con
+  `examples/sonda_de_erolsc.rs` sobre los registros simulados con MEArec de semilla maestra 1 (`data/mearec`, `scripts/simula_monocanal_mearec.py`), contra su verdad. `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos: los resultados de EROLSC de este informe no tienen sesgo de calibración." else "Son los datos con los que se calibraron: los resultados de EROLSC de este informe son optimistas."`
 - **Un canal de un registro multicanal.** Dos neuronas pueden ser indistinguibles en un canal aislado para
   cualquier método; los valores absolutos miden también la dificultad del escenario.

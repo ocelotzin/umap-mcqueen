@@ -99,9 +99,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| s.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>())
         .transpose()?;
     let (td_def, tn_def, m_def): (Vec<f64>, Vec<f64>, Vec<usize>) = if ventanas.is_some() {
-        (vec![2.25, 2.5], vec![0.4, 0.5, 0.6], vec![50, 100, 200])
+        (vec![3.5, 4.5, 5.5], vec![0.3, 0.5], vec![50, 100, 200])
     } else {
-        (vec![2.0, 2.25, 2.5, 3.0, 3.5], vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], vec![20, 50, 100, 200, 400])
+        (vec![2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0], vec![0.1, 0.3, 0.5, 0.7], vec![20, 50, 100, 200])
     };
     //Las rejillas se pueden cambiar sin recompilar: SONDA_TD, SONDA_TN y SONDA_M,
     //listas separadas por comas.
