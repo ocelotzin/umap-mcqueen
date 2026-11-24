@@ -244,15 +244,20 @@ def cmd_registros(a):
         if a.conservar_h5:
             mr.save_recording_generator(rg, filename=os.path.join(carpeta, f"{prefijo}.h5"))
         exp = exporta_registro(rg, carpeta, prefijo, a, rng)
-        for e in exp:
-            todos.append({"registro": prefijo, **e})
         print(f"   {len(exp)} canales exportados", flush=True)
         del rg
+    # El resumen general junta TODOS los registros de la carpeta, no sólo los de esta
+    # corrida: así se pueden generar por tandas (--primero) o en varios procesos.
+    for d in sorted(os.listdir(a.out)):
+        f = os.path.join(a.out, d, "resumen.csv")
+        if d.startswith("r") and os.path.isfile(f):
+            with open(f, newline="") as g:
+                todos += [{"registro": d, **r} for r in csv.DictReader(g) if r["estado"] == "ok"]
     with open(os.path.join(a.out, "resumen.csv"), "w", newline="") as f:
         campos = ["registro", "canal", "carpeta", "n_unidades", "n_spikes", "sigma_uV", "snr_mediana"]
         w = csv.DictWriter(f, fieldnames=campos, extrasaction="ignore")
         w.writeheader(); w.writerows(todos)
-    print(f"Listo: {len(todos)} electrodos monocanal en {a.out}")
+    print(f"Listo: {a.n_registros} registros simulados; la carpeta tiene {len(todos)} electrodos monocanal ({a.out})")
 
 
 def main():

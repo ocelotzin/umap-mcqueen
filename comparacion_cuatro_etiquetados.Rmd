@@ -20,6 +20,7 @@ params:
   muestra: 5000                        # espigas sobre las que corre HDBSCAN (el resto, al vecino más cercano)
   semilla: 1
   puntos_grafica: 6000                 # espigas por canal en las gráficas del encaje
+  fuera_de_muestra: false              # true: datos que no se usaron para calibrar EROLSC (p. ej. simulados con MEArec)
 ---
 
 ```{r setup, include=FALSE}
@@ -62,8 +63,12 @@ compara <- function(metodo, verdad, min_verdad, umbral) {
   ok <- verdad >= 0
   m <- metodo[ok]; v <- verdad[ok]
   conu <- m >= 0
-  k <- as.data.frame(table(v = v[conu], m = m[conu]), stringsAsFactors = FALSE) %>% filter(Freq > 0) %>%
-    mutate(v = as.integer(v), m = as.integer(m))
+  # Un método que lo deja todo como ruido (p. ej. EROLSC en un canal más corto que su
+  # ventana inicial) no tiene unidades: la tabla de contingencia queda vacía.
+  k <- if (any(conu)) {
+    as.data.frame(table(v = v[conu], m = m[conu]), stringsAsFactors = FALSE) %>% filter(Freq > 0) %>%
+      mutate(v = as.integer(v), m = as.integer(m))
+  } else tibble(v = integer(), m = integer(), Freq = integer())
   n_v <- table(v); n_m <- table(m[conu])
   mayor <- k %>% group_by(m) %>% arrange(desc(Freq), v, .by_group = TRUE) %>% slice(1) %>% ungroup()
   tolerante <- ifelse(m < 0, m, mayor$v[match(m, mayor$m)])
@@ -414,8 +419,6 @@ res %>%
   indistinguibles en un canal aislado para cualquier método. La comparación entre métodos sigue siendo válida; los
   valores absolutos miden también la dificultad del escenario.
 - **Pares neurona-canal.** Una neurona visible en varios canales se cuenta en cada uno.
-- **Los parámetros de EROLSC salen de estos mismos datos.** La ventana de 4000 y `Td` 2.25, `Tn` 0.5 y `M` 200 se
-  eligieron con `examples/sonda_de_erolsc.rs` sobre estos 16 canales y contra esta misma verdad, así que los
-  resultados de EROLSC de este informe son optimistas. `comparacion_erolsc_dev_umap_hdbscan.Rmd` mide cuánto se
-  sostiene fuera de muestra (validación cruzada dejando un canal fuera), con otras semillas de UMAP y con otros
-  tamaños de ventana. Todo sale de un solo registro.
+- **Calibración de EROLSC.** La ventana de 4000 y `Td` 2.25, `Tn` 0.5 y `M` 200 se eligieron con
+  `examples/sonda_de_erolsc.rs` sobre los 16 canales del registro híbrido de `monocanal` y contra su verdad.
+  `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos: los resultados de EROLSC de este informe no tienen sesgo de calibración." else "Son los datos de este informe, así que los resultados de EROLSC son optimistas; comparacion_erolsc_dev_umap_hdbscan.Rmd mide cuánto se sostiene fuera de muestra."`

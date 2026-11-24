@@ -18,6 +18,7 @@ params:
   rejilla: "erolsc_rejilla.csv"        # rejilla de EROLSC por canal (examples/sonda_de_erolsc.rs), para la validación cruzada
   rejilla_ventana: "erolsc_rejilla_ventana.csv"  # rejilla que barre también el tamaño de la ventana
   semillas: "1,2,3"                    # otras semillas de UMAP (archivos <etiquetas>_s<semilla>.csv), además de 9999
+  fuera_de_muestra: false              # true: datos que no se usaron para calibrar EROLSC (p. ej. simulados con MEArec)
   min_verdad: 50                       # neuronas (o unidades de referencia) con menos espigas no se evalúan
   umbral: 0.8                          # exactitud para contar una neurona como recuperada
   min_pts: 0                           # HDBSCAN: 0 = automático (0.5 % de la muestra, entre 10 y 200)
@@ -67,8 +68,12 @@ compara <- function(metodo, verdad, min_verdad, umbral) {
   ok <- verdad >= 0
   m <- metodo[ok]; v <- verdad[ok]
   conu <- m >= 0
-  k <- as.data.frame(table(v = v[conu], m = m[conu]), stringsAsFactors = FALSE) %>% filter(Freq > 0) %>%
-    mutate(v = as.integer(v), m = as.integer(m))
+  # Un método que lo deja todo como ruido (p. ej. EROLSC en un canal más corto que su
+  # ventana inicial) no tiene unidades: la tabla de contingencia queda vacía.
+  k <- if (any(conu)) {
+    as.data.frame(table(v = v[conu], m = m[conu]), stringsAsFactors = FALSE) %>% filter(Freq > 0) %>%
+      mutate(v = as.integer(v), m = as.integer(m))
+  } else tibble(v = integer(), m = integer(), Freq = integer())
   n_v <- table(v); n_m <- table(m[conu])
   mayor <- k %>% group_by(m) %>% arrange(desc(Freq), v, .by_group = TRUE) %>% slice(1) %>% ungroup()
   tolerante <- ifelse(m < 0, m, mayor$v[match(m, mayor$m)])
@@ -287,8 +292,8 @@ referencia:
 
 Los dos métodos en línea agrupan **el mismo encaje**: UMAP paramétrico entrenado con las primeras 2000 espigas de
 cada canal y semilla 9999, lotes de 200. Con la semilla fija el entrenamiento es reproducible, y el encaje sobre el
-que agrupa EROLSC (`erolsc_encaje.csv`) es idéntico, valor por valor, al de dev (`encaje.csv`) en los 16 canales:
-sólo cambia el agrupador. La comparación se hace de cuatro formas:
+que agrupa EROLSC (`erolsc_encaje.csv`) es idéntico, valor por valor, al de dev (comprobado en los 16 canales de
+`monocanal`; en otros datos, el mismo código y la misma semilla dan lo mismo): sólo cambia el agrupador. La comparación se hace de cuatro formas:
 
 1. **Contra UMAP + HDBSCAN**: ¿cuánto se parece cada método en línea a lo que haría el agrupador offline usual?
 2. **Contra la verdad de campo**: ¿cuál acierta más? Aquí UMAP + HDBSCAN entra como un tercer método.
@@ -330,10 +335,51 @@ if (tiene_semillas) {
     length(semillas_ok), paste(semillas_ok, collapse = ", "), gana_sem, nrow(por_semilla),
     num(mean(por_canal_sem$dif), 3), num(ic_sem[1], 3), num(ic_sem[2], 3), p_txt(p_sem)))
 }
-cat(paste0(
-  "- **Falta un registro independiente.** Los 16 canales son del mismo registro híbrido, y la calibración y la ",
-  "evaluación salen de ellos. Una ventaja de EROLSC sólo quedaría establecida en datos que no se usaron para ",
-  "elegir sus parámetros.\n"))
+if (!tiene_cv) {
+  # Sin rejilla: los parámetros de EROLSC son los por defecto, congelados. Si los
+  # datos no se usaron para calibrarlos, esta comparación ya es fuera de muestra.
+  a_e <- ari_de("EROLSC"); a_d <- ari_de("Propagación (dev)"); a_h <- ari_de("UMAP + HDBSCAN")
+  d_dev <- a_e$ari - a_d$ari[match(a_e$canal, a_d$canal)]
+  d_hdb <- a_e$ari - a_h$ari[match(a_e$canal, a_h$canal)]
+  set.seed(params$semilla)
+  ic <- function(d) quantile(replicate(10000, mean(sample(d, replace = TRUE))), c(0.025, 0.975))
+  frase <- function(d) {
+    i <- ic(d)
+    sprintf("%s (IC 95 %% bootstrap [%s, %s]; Wilcoxon pareado %s; EROLSC es mayor en %d de %d canales)",
+            num(mean(d), 3), num(i[1], 3), num(i[2], 3),
+            p_txt(wilcox.test(d, exact = FALSE)$p.value), sum(d > 0), length(d))
+  }
+  cat(sprintf(paste0(
+    "- **Con los parámetros de EROLSC congelados** (los calibrados en otros datos), su ARI medio es %s, frente a ",
+    "%s de la propagación de dev y %s de UMAP + HDBSCAN. Diferencia con dev: %s. Diferencia con UMAP + HDBSCAN: %s.\n"),
+    num(mean(a_e$ari), 3), num(mean(a_d$ari), 3), num(mean(a_h$ari), 3), frase(d_dev), frase(d_hdb)))
+  # Los canales de un mismo registro comparten neuronas: no son independientes.
+  # La misma comparación con un valor por registro (media de sus canales).
+  reg <- sub("_canal_.*$", "", a_e$canal)
+  if (any(reg != a_e$canal) && length(unique(reg)) > 1) {
+    por_reg <- tibble(registro = reg, dev = d_dev, hdb = d_hdb) %>% group_by(registro) %>%
+      summarise(dev = mean(dev), hdb = mean(hdb), .groups = "drop")
+    cat(sprintf(paste0(
+      "- **Por registro** (los canales de un registro comparten neuronas y no son independientes): EROLSC supera ",
+      "a la propagación en %d de %d registros (diferencia media %s) y a UMAP + HDBSCAN en %d de %d (%s).\n"),
+      sum(por_reg$dev > 0), nrow(por_reg), num(mean(por_reg$dev), 3),
+      sum(por_reg$hdb > 0), nrow(por_reg), num(mean(por_reg$hdb), 3)))
+  }
+  cat(sprintf("- **Neuronas recuperadas** (exactitud ≥ %s): EROLSC %d, propagación %d, UMAP + HDBSCAN %d, de %d.\n",
+              params$umbral, sum(res$recuperadas[res$metodo == "EROLSC"]),
+              sum(res$recuperadas[res$metodo == "Propagación (dev)"]),
+              sum(res$recuperadas[res$metodo == "UMAP + HDBSCAN"]), sum(res$evaluadas[res$metodo == "EROLSC"])))
+}
+if (params$fuera_de_muestra) {
+  cat(paste0(
+    "- **Datos fuera de muestra.** Estos datos no se usaron para elegir los parámetros de EROLSC ni el tamaño de ",
+    "su ventana: es la prueba independiente que faltaba en el registro híbrido.\n"))
+} else {
+  cat(paste0(
+    "- **Falta un registro independiente.** Los canales son del mismo registro, y la calibración y la ",
+    "evaluación salen de ellos. Una ventaja de EROLSC sólo quedaría establecida en datos que no se usaron para ",
+    "elegir sus parámetros.\n"))
+}
 ```
 
 # Datos
@@ -464,8 +510,8 @@ neu %>%
 
 ## Validación cruzada: parámetros elegidos sin el canal evaluado
 
-Los parámetros por defecto de EROLSC (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con estos mismos 16 canales y contra
-esta misma verdad, así que su ARI en la sección anterior es optimista. Aquí cada canal se evalúa con la combinación
+Los parámetros por defecto de EROLSC (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con los 16 canales del
+registro híbrido de `monocanal` y contra su verdad. `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos, así que aquí no hay sesgo de calibración." else "Son los datos de este informe: los resultados de EROLSC con esos parámetros son optimistas."` Aquí cada canal se evalúa con la combinación
 de la rejilla (`r params$rejilla`, `r if (tiene_cv) nrow(rejillas) / n_canales else 0` combinaciones de `Td`, `Tn`
 y `M`, sobre el mismo encaje) que mejor ARI medio da en los **otros** `r n_canales - 1` canales. La propagación de
 dev no tiene parámetros ajustados a estos datos y se compara tal cual.
@@ -696,9 +742,7 @@ res %>%
   EROLSC deja como anomalía las que caen a más de `Td` = 2.25 de toda gaussiana (≈ 13 %); la propagación asigna
   casi todas.
 - **Calibración de EROLSC.** Sus parámetros por defecto (ventana 4000, `Td` 2.25, `Tn` 0.5, `M` 200) se eligieron con
-  `examples/sonda_de_erolsc.rs` sobre estos mismos 16 canales y contra esta misma verdad. Todo resultado de EROLSC
-  con esos parámetros (secciones «Contra UMAP + HDBSCAN», «Contra la verdad de campo», «Otras semillas» y las
-  gráficas) es optimista; la medida honesta es la de la validación cruzada. Aun ésta reutiliza el mismo registro:
-  falta confirmar en uno independiente.
+  `examples/sonda_de_erolsc.rs` sobre los 16 canales del registro híbrido de `monocanal` y contra su verdad.
+  `r if (params$fuera_de_muestra) "Estos datos no se usaron para elegirlos: los resultados de EROLSC de este informe no tienen sesgo de calibración." else "Sobre esos mismos datos, todo resultado de EROLSC con esos parámetros es optimista; la medida honesta es la de la validación cruzada, que aun así reutiliza el mismo registro."`
 - **Un canal de un registro multicanal.** Dos neuronas pueden ser indistinguibles en un canal aislado para
   cualquier método; los valores absolutos miden también la dificultad del escenario.
