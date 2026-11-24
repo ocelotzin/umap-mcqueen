@@ -150,13 +150,16 @@ Desde la raíz del repo (en Windows, fuera de RStudio, antes `export RSTUDIO_PAN
 
 ```sh
 for rmd in comparacion_cuatro_etiquetados comparacion_erolsc_dev_umap_hdbscan; do
-  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes')"
-  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes', output_file = '${rmd}_mearec.html',
+  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes', output_file = '${rmd}_monocanal.html')"
+  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes', output_file = '${rmd}_mearec_calibracion.html',
               params = list(carpeta = '../data/mearec', fuera_de_muestra = FALSE))"
-  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes', output_file = '${rmd}_validacion.html',
+  Rscript -e "rmarkdown::render('analisis/$rmd.Rmd', output_dir = 'reportes', output_file = '${rmd}_mearec_validacion.html',
               params = list(carpeta = '../data/mearec_validacion'))"
 done
 ```
+
+Cada informe lleva en el nombre el conjunto de datos: `_monocanal` (registro híbrido), `_mearec_calibracion`
+(`data/mearec`) y `_mearec_validacion` (`data/mearec_validacion`).
 
 Resultado con los parámetros actuales (ARI medio contra la verdad; EROLSC / propagación de dev / UMAP + HDBSCAN):
 validación 0.428 / 0.407 / 0.573; registro híbrido 0.173 / 0.171 / 0.172. EROLSC y la propagación quedan empatados
