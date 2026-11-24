@@ -77,8 +77,8 @@ pub struct Parametros {
     pub ventana: usize,
     /// `M`: puntos mínimos para que un grupo sea gaussiana.
     pub min_puntos: usize,
-    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 3.0 deja
-    /// fuera ≈ 1 % de una gaussiana (χ²₂ = 9).
+    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 2.5 deja
+    /// fuera ≈ 4 % de una gaussiana (χ²₂ = 6.25).
     pub umbral_distancia: f64,
     /// `Tn`: pertenencia posibilística mínima a algún grupo para no ser anomalía.
     pub umbral_pertenencia: f64,
@@ -88,20 +88,41 @@ pub struct Parametros {
     pub c_anomalias: usize,
     /// Legitimidad de un grupo emergente (ver la documentación del módulo).
     pub factor_dispersion: f64,
+    /// Fusión de prototipos de PCM: se unen si `‖vᵢ − vⱼ‖² < factor_fusion · min(ηᵢ, ηⱼ)`.
+    pub factor_fusion: f64,
     /// Semilla del sembrado de PCM, para que una corrida se pueda repetir.
     pub semilla: u64,
 }
 
+/// Valores calibrados con `examples/sonda_de_erolsc.rs` sobre los encajes de
+/// los 16 canales de `monocanal` (híbrido de Janelia con deriva, 5–11 unidades
+/// por canal), contra las etiquetas verdaderas, con ventana 1000 y lotes de 200.
+/// ARI contando el ruido de EROLSC como un grupo más:
+///
+/// | Td  | Tn  | M  | ARI medio | ARI peor canal | grupos (mediana) | ruido |
+/// |-----|-----|----|-----------|----------------|------------------|-------|
+/// | 3.0 | 0.1 | 20 | 0.127     | 0.002          | 4                | 3 %   |
+/// | 2.5 | 0.5 | 50 | 0.252     | 0.012          | 4                | 7.5 % |
+/// | 2.0 | 0.6 | 50 | 0.248     | 0.119          | 7                | 16 %  |
+///
+/// La primera fila son los valores de partida; la segunda, éstos (mejor media y
+/// menos ruido); la tercera, la alternativa con mejor peor canal a cambio del
+/// doble de ruido. En los mismos canales el agrupador de `dev` da ARI medio
+/// 0.171 y PCA + HDBSCAN offline 0.100. La rejilla es plana entre 0.24 y 0.25;
+/// `factor_fusion` y `C` casi no movieron el resultado. Las unidades de un
+/// canal se solapan en el encaje 2D, así que ningún agrupador sobre él las
+/// separa todas.
 impl Default for Parametros {
     fn default() -> Self {
         Parametros {
             ventana: VENTANA,
-            min_puntos: 20,
-            umbral_distancia: 3.0,
-            umbral_pertenencia: 0.1,
+            min_puntos: 50,
+            umbral_distancia: 2.5,
+            umbral_pertenencia: 0.5,
             c_inicial: 10,
             c_anomalias: 10,
             factor_dispersion: 2.0,
+            factor_fusion: 1.0,
             semilla: 0x5EED,
         }
     }
@@ -126,6 +147,9 @@ impl Parametros {
         }
         if self.c_inicial == 0 || self.c_anomalias == 0 {
             return Err("C de PCM debe ser al menos 1".into());
+        }
+        if !(self.factor_fusion >= 0.0) {
+            return Err("factor_fusion no puede ser negativo".into());
         }
         if !(self.factor_dispersion > 0.0) {
             return Err("factor_dispersion debe ser positivo".into());
@@ -166,7 +190,7 @@ impl Gaussiana {
         for x in puntos {
             g.acumula(x, 1.0);
         }
-        g.estima(1).then_some(g)
+        g.estima(1, 1.0).then_some(g)
     }
 
     fn acumula(&mut self, x: &[f64], signo: f64) {
@@ -184,10 +208,11 @@ impl Gaussiana {
         }
     }
 
-    /// Recalcula media y covarianza desde las sumas de la ventana. Con menos de
-    /// `min_puntos` puntos, o si la covarianza no es definida positiva, se
-    /// conservan los parámetros anteriores y devuelve `false`.
-    fn estima(&mut self, min_puntos: usize) -> bool {
+    /// Recalcula media y covarianza desde las sumas de la ventana, con la
+    /// covarianza multiplicada por `correccion` (ver [`correccion_truncado`]).
+    /// Con menos de `min_puntos` puntos, o si la covarianza no es definida
+    /// positiva, se conservan los parámetros anteriores y devuelve `false`.
+    fn estima(&mut self, min_puntos: usize, correccion: f64) -> bool {
         let d = self.media.len();
         if self.n < min_puntos.max(2) {
             return false;
@@ -197,7 +222,7 @@ impl Gaussiana {
         let mut cov = vec![0.0; d * d];
         for i in 0..d {
             for j in 0..d {
-                cov[i * d + j] = self.suma_cuad[i * d + j] / n - media[i] * media[j];
+                cov[i * d + j] = correccion * (self.suma_cuad[i * d + j] / n - media[i] * media[j]);
             }
         }
         let traza: f64 = (0..d).map(|i| cov[i * d + i]).sum();
@@ -229,6 +254,46 @@ impl Gaussiana {
         }
         q.sqrt()
     }
+}
+
+/// Factor por el que hay que multiplicar la covarianza muestral de los puntos
+/// de una gaussiana de dimensión `d` que cayeron a distancia de Mahalanobis
+/// menor que `td`, para recuperar la covarianza de la gaussiana completa:
+/// `P(χ²_d < td²) / P(χ²_{d+2} < td²)`, la corrección de consistencia del MCD.
+///
+/// Sin ella cada gaussiana se estima sólo con lo que absorbió, sale más
+/// estrecha que la nube real, y con la ventana movible se encoge un poco más en
+/// cada renovación de la ventana (≈ 14 % de varianza por vuelta con `Td` 2.5):
+/// las colas quedan como anomalías y acaban naciendo como grupos falsos
+/// alrededor del verdadero.
+fn correccion_truncado(d: usize, td: f64) -> f64 {
+    let x = td * td / 2.0;
+    let dentro = gamma_inferior_regularizada(d as f64 / 2.0, x);
+    let dentro_mas_2 = gamma_inferior_regularizada(d as f64 / 2.0 + 1.0, x);
+    if dentro_mas_2 > 0.0 { dentro / dentro_mas_2 } else { 1.0 }
+}
+
+/// P(a, x) por su serie; `a` es entero o semientero (la mitad de una dimensión).
+fn gamma_inferior_regularizada(a: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    //Γ(a + 1) por recurrencia desde Γ(1) = 1 o Γ(½) = √π.
+    let (mut g, mut z) = if (a.fract() - 0.5).abs() < 1e-9 { (std::f64::consts::PI.sqrt(), 0.5) } else { (1.0, 1.0) };
+    while z < a + 1.0 - 1e-9 {
+        g *= z;
+        z += 1.0;
+    }
+    let mut termino = 1.0;
+    let mut suma = 1.0;
+    for k in 1..500 {
+        termino *= x / (a + k as f64);
+        suma += termino;
+        if termino < 1e-16 * suma {
+            break;
+        }
+    }
+    (suma * (-x + a * x.ln()).exp() / g).min(1.0)
 }
 
 fn cholesky(a: &[f64], d: usize) -> Option<Vec<f64>> {
@@ -270,6 +335,8 @@ pub struct Erolsc {
     siguiente_id: i64,
     t: u64,
     rng: Rng,
+    /// Corrección de la covarianza por truncado en `Td`; se fija con la dimensión.
+    correccion: f64,
 }
 
 impl Erolsc {
@@ -283,6 +350,7 @@ impl Erolsc {
             siguiente_id: 0,
             t: 0,
             rng: Rng::new(p.semilla),
+            correccion: 1.0,
             p,
         })
     }
@@ -302,7 +370,13 @@ impl Erolsc {
         let t0 = self.t;
         let mut salida = vec![SIN_CLASIFICAR; puntos.len()];
         for x in puntos {
-            let d = *self.dim.get_or_insert(x.len());
+            let d = match self.dim {
+                Some(d) => d,
+                None => {
+                    self.correccion = correccion_truncado(x.len(), self.p.umbral_distancia);
+                    *self.dim.insert(x.len())
+                }
+            };
             if x.len() != d {
                 return Err(format!("punto de dimensión {} en un encaje de dimensión {d}", x.len()));
             }
@@ -334,10 +408,10 @@ impl Erolsc {
                 salida[(viejo.t - t0) as usize] = if self.inicializado { viejo.etiqueta } else { SIN_CLASIFICAR };
             }
             if viejo.etiqueta >= 0 {
-                let min_puntos = self.p.min_puntos;
+                let (min_puntos, corr) = (self.p.min_puntos, self.correccion);
                 if let Some(g) = self.gaussianas.iter_mut().find(|g| g.id == viejo.etiqueta) {
                     g.acumula(&viejo.x, -1.0);
-                    g.estima(min_puntos);
+                    g.estima(min_puntos, corr);
                 }
             }
         }
@@ -354,7 +428,7 @@ impl Erolsc {
         }
         let g = &mut self.gaussianas[k];
         g.acumula(x, 1.0);
-        g.estima(self.p.min_puntos);
+        g.estima(self.p.min_puntos, self.correccion);
         g.id
     }
 
@@ -410,7 +484,7 @@ impl Erolsc {
     /// su etiqueta.
     fn siembra_grupos(&mut self, idx: &[usize], c: usize, exige_legitimidad: bool) {
         let puntos: Vec<&[f64]> = idx.iter().map(|&i| self.ventana[i].x.as_slice()).collect();
-        let grupos = pcm_agrupa(&puntos, c, self.p.umbral_pertenencia, &mut self.rng);
+        let grupos = pcm_agrupa(&puntos, c, self.p.umbral_pertenencia, self.p.factor_fusion, &mut self.rng);
         let dispersion_max = self
             .gaussianas
             .iter()
@@ -426,6 +500,13 @@ impl Erolsc {
             if exige_legitimidad
                 && dispersion_max > 0.0
                 && g.dispersion > self.p.factor_dispersion * dispersion_max
+            {
+                continue;
+            }
+            //Un grupo cuyo centro cae dentro de una gaussiana es su borde, no
+            //una estructura nueva.
+            if exige_legitimidad
+                && self.gaussianas.iter().any(|e| e.mahalanobis(&g.media) < self.p.umbral_distancia)
             {
                 continue;
             }
@@ -486,7 +567,7 @@ fn dist2(a: &[f64], b: &[f64]) -> f64 {
 /// Agrupa `puntos` con PCM (`C = c`, `m = 2`) y fusiona los prototipos
 /// coincidentes. Devuelve los índices de cada grupo; los puntos con
 /// pertenencia menor que `tn` a todos los grupos no aparecen (son anomalías).
-fn pcm_agrupa(puntos: &[&[f64]], c: usize, tn: f64, rng: &mut Rng) -> Vec<Vec<usize>> {
+fn pcm_agrupa(puntos: &[&[f64]], c: usize, tn: f64, fusion: f64, rng: &mut Rng) -> Vec<Vec<usize>> {
     let n = puntos.len();
     let c = c.min(n);
     if c == 0 {
@@ -552,7 +633,7 @@ fn pcm_agrupa(puntos: &[&[f64]], c: usize, tn: f64, rng: &mut Rng) -> Vec<Vec<us
     }
     for a in 0..c {
         for b in a + 1..c {
-            if dist2(&v[a], &v[b]) < eta[a].min(eta[b]) {
+            if dist2(&v[a], &v[b]) < fusion * eta[a].min(eta[b]) {
                 let (ra, rb) = (raiz(&mut padre, a), raiz(&mut padre, b));
                 padre[ra] = rb;
             }
@@ -701,6 +782,30 @@ mod pruebas {
     }
 
     #[test]
+    fn correccion_de_truncado() {
+        //En 2D, P(χ²₂ < x) = 1 − e^{−x/2} y P(χ²₄ < x) = 1 − e^{−x/2}(1 + x/2).
+        for td in [2.0_f64, 2.5, 3.0] {
+            let x = td * td;
+            let esperado = (1.0 - (-x / 2.0).exp()) / (1.0 - (-x / 2.0).exp() * (1.0 + x / 2.0));
+            assert!((correccion_truncado(2, td) - esperado).abs() < 1e-9);
+        }
+        //Con umbral enorme no hay truncado.
+        assert!((correccion_truncado(3, 50.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn una_sola_nube_estable_no_se_encoge_ni_se_parte() {
+        let mut rng = Rng::new(23);
+        let mut e = Erolsc::new(Parametros::default()).unwrap();
+        for _ in 0..50 {
+            e.actualiza_lote(&nube(&mut rng, (0.5, 0.5), 0.03, 200)).unwrap();
+        }
+        assert_eq!(e.n_grupos(), 1, "grupos: {:?}", e.grupos());
+        let g = &e.gaussianas[0];
+        assert!((g.dispersion / 0.03 - 1.0).abs() < 0.15, "dispersión {} frente a 0.03", g.dispersion);
+    }
+
+    #[test]
     fn la_ventana_por_defecto_es_1000() {
         assert_eq!(Parametros::default().ventana, 1000);
     }
@@ -725,8 +830,13 @@ mod pruebas {
         //Los 4 primeros lotes salen antes de que la ventana se llene: sin clasificar.
         assert!(etiquetas[..800].iter().all(|&x| x == SIN_CLASIFICAR));
         let verdad: Vec<usize> = datos.iter().map(|p| p.1).collect();
-        let (p, may) = pureza(&etiquetas[800..], &verdad[800..], 3);
-        assert!(p > 0.95, "pureza {p}");
+        //Con Td = 2.5 la cola de cada gaussiana (≈ 4 %) queda como ruido a
+        //propósito: se mide aparte la pureza de lo etiquetado y el ruido.
+        let (et, ve) = (&etiquetas[800..], &verdad[800..]);
+        let ruido = et.iter().filter(|&&x| x == RUIDO).count() as f64 / et.len() as f64;
+        assert!(ruido < 0.10, "ruido {ruido}");
+        let (p, may) = pureza(et, ve, 3);
+        assert!(p / (1.0 - ruido) > 0.99, "pureza sin ruido {}", p / (1.0 - ruido));
         assert_ne!(may[0], may[1]);
         assert_ne!(may[1], may[2]);
     }
