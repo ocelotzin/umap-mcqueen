@@ -545,7 +545,6 @@ impl Erolsc {
     }
 
     /// Los puntos de la ventana con su etiqueta actual, del más viejo al más nuevo.
-    #[allow(dead_code)] // para quien quiera graficar la ventana con sus etiquetas
     pub fn ventana(&self) -> impl Iterator<Item = (&[f64], i64)> {
         self.ventana.iter().map(|e| (e.x.as_slice(), e.etiqueta))
     }

@@ -1,0 +1,461 @@
+---
+title: "EROLSC y propagación de etiquetas, contra UMAP + HDBSCAN"
+subtitle: "Los dos agrupadores en línea de umap-mcqueen, por canal"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+    code_folding: hide
+params:
+  carpeta: "../umap-mcqueen-actual-trabaj/data/monocanal"  # carpeta con una subcarpeta por canal
+  formas: "spikes.csv"                 # formas de onda, una fila por espiga
+  verdad: "labels.csv"                 # etiquetas verdaderas
+  erolsc: "erolsc_labels.csv"          # EROLSC, rama erolsc (scripts/etiqueta_erolsc.sh)
+  dev: "mcqueen_labels.csv"            # propagación de etiquetas, rama dev (scripts/etiqueta_carpeta.py)
+  min_verdad: 50                       # neuronas (o unidades de referencia) con menos espigas no se evalúan
+  umbral: 0.8                          # exactitud para contar una neurona como recuperada
+  min_pts: 0                           # HDBSCAN: 0 = automático (0.5 % de la muestra, entre 10 y 200)
+  muestra: 5000                        # espigas sobre las que corre HDBSCAN (el resto, al vecino más cercano)
+  semilla: 1
+  puntos_grafica: 6000                 # espigas por canal en las gráficas del encaje
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 8, fig.height = 4.5)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(uwot)
+library(dbscan)
+
+num <- function(x, d = 2) format(round(x, d), nsmall = d)
+pct <- function(x, d = 1) paste0(format(round(100 * x, d), nsmall = d), " %")
+p_fmt <- function(p) if (is.na(p)) "n/c" else if (p < 0.001) "< 0.001" else format(round(p, 3), nsmall = 3)
+metodos <- c("EROLSC", "Propagación (dev)", "UMAP + HDBSCAN")
+metodos_linea <- c("EROLSC", "Propagación (dev)")
+colores <- c("EROLSC" = "#3182bd", "Propagación (dev)" = "#31a354", "UMAP + HDBSCAN" = "#e6550d")
+```
+
+```{r funciones, include=FALSE}
+# Primera columna de un CSV como enteros; salta una cabecera no numérica.
+lee_etiquetas <- function(ruta) {
+  x <- read_csv(ruta, col_names = FALSE, col_types = cols(.default = col_character()), progress = FALSE)[[1]]
+  if (is.na(suppressWarnings(as.numeric(x[1])))) x <- x[-1]
+  as.integer(round(as.numeric(x)))
+}
+
+# Índice de Rand ajustado.
+ari <- function(a, b) {
+  t <- table(a, b)
+  c2 <- function(x) x * (x - 1) / 2
+  s <- sum(c2(t)); sa <- sum(c2(rowSums(t))); sb <- sum(c2(colSums(t)))
+  e <- sa * sb / c2(length(a)); d <- 0.5 * (sa + sb) - e
+  if (d == 0) 1 else (s - e) / d
+}
+
+# Medidas de un etiquetado contra la verdad (mismas definiciones que
+# scripts/compara_etiquetas.py). Ruido del método = etiqueta negativa, cuenta como
+# una clase más; espigas sin verdad (negativas) no se evalúan.
+compara <- function(metodo, verdad, min_verdad, umbral) {
+  ok <- verdad >= 0
+  m <- metodo[ok]; v <- verdad[ok]
+  conu <- m >= 0
+  k <- as.data.frame(table(v = v[conu], m = m[conu]), stringsAsFactors = FALSE) %>% filter(Freq > 0) %>%
+    mutate(v = as.integer(v), m = as.integer(m))
+  n_v <- table(v); n_m <- table(m[conu])
+  mayor <- k %>% group_by(m) %>% arrange(desc(Freq), v, .by_group = TRUE) %>% slice(1) %>% ungroup()
+  tolerante <- ifelse(m < 0, m, mayor$v[match(m, mayor$m)])
+  neuronas <- names(n_v)[n_v >= min_verdad]
+  por_neurona <- lapply(neuronas, function(vv) {
+    vv <- as.integer(vv); nv <- as.integer(n_v[as.character(vv)])
+    kk <- k %>% filter(v == vv)
+    if (nrow(kk) == 0) return(tibble(neurona = vv, espigas = nv, exactitud = 0, exactitud_tol = 0))
+    mejor <- kk %>% arrange(desc(Freq), m) %>% slice(1)
+    nm <- as.integer(n_m[as.character(mejor$m)])
+    suyas <- mayor$m[mayor$v == vv]
+    ktol <- sum(kk$Freq[kk$m %in% suyas]); ntol <- sum(n_m[as.character(suyas)])
+    tibble(neurona = vv, espigas = nv,
+           exactitud = mejor$Freq / (nv + nm - mejor$Freq),
+           exactitud_tol = if (ktol > 0) ktol / (nv + ntol - ktol) else 0)
+  }) %>% bind_rows()
+  list(
+    resumen = tibble(
+      ari = ari(m, v), ari_tolerante = ari(tolerante, v),
+      pureza = if (sum(conu) > 0) sum(mayor$Freq) / sum(conu) else NA_real_,
+      unidades = length(n_m), unidades_05 = sum(n_m >= 0.005 * length(m)), ruido = mean(m < 0),
+      evaluadas = nrow(por_neurona), recuperadas = sum(por_neurona$exactitud >= umbral),
+      recuperadas_tol = sum(por_neurona$exactitud_tol >= umbral),
+      exactitud_mediana = if (nrow(por_neurona)) median(por_neurona$exactitud) else NA_real_),
+    neuronas = por_neurona)
+}
+
+# HDBSCAN del paquete dbscan guarda la matriz de distancias completa (memoria
+# O(n²): con 25 000 espigas, ~5 GB). Corre sobre una muestra regular de
+# `muestra` espigas, y cada espiga restante toma la etiqueta de su vecina más
+# cercana de la muestra (incluido el ruido), como hace la sonda de umap-mcqueen.
+hdbscan_muestra <- function(Y, min_pts, muestra) {
+  n <- nrow(Y)
+  idx <- if (n > muestra) round(seq(1, n, length.out = muestra)) else seq_len(n)
+  mp <- if (min_pts > 0) min_pts else as.integer(min(200, max(10, round(0.005 * length(idx)))))
+  cl <- hdbscan(Y[idx, , drop = FALSE], minPts = mp)$cluster
+  cl[cl == 0] <- -1L                                  # HDBSCAN de R usa 0 para el ruido
+  if (length(idx) == n) return(as.integer(cl))
+  vecino <- kNN(Y[idx, , drop = FALSE], k = 1, query = Y)$id[, 1]
+  as.integer(cl[vecino])
+}
+
+# Etiquetados offline de referencia sobre las formas de onda de un canal, y los
+# dos encajes 2D sobre los que se grafica (UMAP de R y PCA). Todo se guarda junto
+# a las formas de onda (pca_hdbscan_labels.csv, umap_hdbscan_labels.csv,
+# umap_encaje.csv, pca_encaje.csv) y se reutiliza en la siguiente compilación.
+offline <- function(dir, X, min_pts, muestra, semilla) {
+  rutas <- file.path(dir, c("pca_hdbscan_labels.csv", "umap_hdbscan_labels.csv", "umap_encaje.csv", "pca_encaje.csv"))
+  if (all(file.exists(rutas))) {
+    lee_xy <- function(r) as.matrix(read_csv(r, col_names = FALSE, show_col_types = FALSE, progress = FALSE))
+    return(list(pca = lee_etiquetas(rutas[1]), umap = lee_etiquetas(rutas[2]),
+                encaje_umap = lee_xy(rutas[3]), encaje_pca = lee_xy(rutas[4])))
+  }
+  pcs <- prcomp(X, center = TRUE, scale. = FALSE)$x[, 1:3]
+  pca <- hdbscan_muestra(pcs, min_pts, muestra)
+  set.seed(semilla)
+  enc <- umap(scale(X), n_neighbors = 15, n_components = 2, min_dist = 0.1, n_threads = 1, seed = semilla)
+  um <- hdbscan_muestra(enc, min_pts, muestra)
+  write_lines(pca, rutas[1]); write_lines(um, rutas[2])
+  write_csv(as.data.frame(enc), rutas[3], col_names = FALSE)
+  write_csv(as.data.frame(pcs[, 1:2]), rutas[4], col_names = FALSE)
+  list(pca = pca, umap = um, encaje_umap = enc, encaje_pca = pcs[, 1:2])
+}
+
+# Colores por etiqueta: las 10 unidades (o neuronas) con más espigas, cada una con
+# su color; el resto, «otras»; el ruido, aparte. Así un mismo color no significa
+# lo mismo entre etiquetados: lo que se compara es la forma de las zonas.
+paleta <- c("#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+            "#9c755f", "#17becf", "otras" = "grey80", "ruido" = "black")
+a_colores <- function(et) {
+  tam <- sort(table(et[et >= 0]), decreasing = TRUE)
+  arriba <- as.integer(names(tam))[seq_len(min(10, length(tam)))]
+  f <- ifelse(et < 0, "ruido", ifelse(et %in% arriba, paste0("u", match(et, arriba)), "otras"))
+  factor(f, levels = c(paste0("u", 1:10), "otras", "ruido"))
+}
+colores_et <- setNames(paleta, c(paste0("u", 1:10), "otras", "ruido"))
+
+# Acierto de cada espiga según un método: correcta si la neurona mayoritaria de
+# su unidad es su neurona verdadera (la lectura tolerante: partir no es error).
+acierto_espiga <- function(metodo, verdad) {
+  conu <- metodo >= 0 & verdad >= 0
+  mayor <- tapply(verdad[conu], metodo[conu], function(v) as.integer(names(which.max(table(v)))))
+  asignada <- mayor[as.character(metodo)]
+  factor(ifelse(metodo < 0, "ruido", ifelse(asignada == verdad, "correcta", "error")),
+         levels = c("correcta", "error", "ruido"))
+}
+```
+
+```{r datos, include=FALSE}
+dirs <- dirname(list.files(params$carpeta, pattern = paste0("^", params$erolsc, "$"), recursive = TRUE, full.names = TRUE))
+dirs <- dirs[file.exists(file.path(dirs, params$verdad)) & file.exists(file.path(dirs, params$formas)) &
+             file.exists(file.path(dirs, params$dev))]
+stopifnot("No hay carpetas con formas de onda, verdad y etiquetas de ambos métodos" = length(dirs) > 0)
+
+resultados <- list(); neuronas <- list(); contra_ref <- list(); graficas <- list()
+for (dir in sort(dirs)) {
+  canal <- basename(dir)
+  X <- as.matrix(read_csv(file.path(dir, params$formas), col_names = FALSE, show_col_types = FALSE, progress = FALSE))
+  verdad <- lee_etiquetas(file.path(dir, params$verdad))
+  ero <- lee_etiquetas(file.path(dir, params$erolsc))
+  dev <- lee_etiquetas(file.path(dir, params$dev))
+  stopifnot(length(verdad) == nrow(X), length(ero) == nrow(X), length(dev) == nrow(X))
+  ref <- offline(dir, X, params$min_pts, params$muestra, params$semilla)
+  etiq <- list("EROLSC" = ero, "Propagación (dev)" = dev, "UMAP + HDBSCAN" = ref$umap)
+
+  # Contra la verdad: los tres.
+  for (met in names(etiq)) {
+    r <- compara(etiq[[met]], verdad, params$min_verdad, params$umbral)
+    resultados[[length(resultados) + 1]] <- r$resumen %>% mutate(canal = canal, metodo = met, espigas = nrow(X),
+                                                                  neuronas_verdad = length(unique(verdad[verdad >= 0])))
+    neuronas[[length(neuronas) + 1]] <- r$neuronas %>% mutate(canal = canal, metodo = met)
+  }
+  # Contra UMAP + HDBSCAN como referencia: los dos en línea. Las espigas que
+  # HDBSCAN deja como ruido no tienen referencia y no se evalúan (igual que las
+  # espigas sin verdad en `compara`).
+  for (met in metodos_linea) {
+    r <- compara(etiq[[met]], ref$umap, params$min_verdad, params$umbral)
+    contra_ref[[length(contra_ref) + 1]] <- r$resumen %>%
+      mutate(canal = canal, metodo = met, ari_completo = ari(etiq[[met]], ref$umap),
+             unidades_ref = length(unique(ref$umap[ref$umap >= 0])), ruido_ref = mean(ref$umap < 0))
+  }
+
+  sel <- round(seq(1, nrow(X), length.out = min(nrow(X), params$puntos_grafica)))
+  base <- tibble(x = ref$encaje_umap[sel, 1], y = ref$encaje_umap[sel, 2], i = sel)
+  et4 <- c(list("Verdad" = verdad), etiq)
+  graficas[[canal]] <- list(
+    etiquetas = bind_rows(lapply(names(et4), function(n) base %>% mutate(etiquetado = n, color = a_colores(et4[[n]])[i]))),
+    aciertos = bind_rows(lapply(names(etiq), function(n) base %>%
+                                  mutate(metodo = n, acierto = acierto_espiga(etiq[[n]], verdad)[i]))))
+}
+res <- bind_rows(resultados) %>% mutate(metodo = factor(metodo, levels = metodos))
+neu <- bind_rows(neuronas) %>% mutate(metodo = factor(metodo, levels = metodos))
+cref <- bind_rows(contra_ref) %>% mutate(metodo = factor(metodo, levels = metodos_linea))
+n_canales <- length(unique(res$canal))
+```
+
+# Objetivo
+
+Comparar los dos agrupadores en línea de umap-mcqueen entre sí, tomando **UMAP + HDBSCAN offline** como punto de
+referencia:
+
+- **EROLSC** (rama `erolsc`): *Extended Robust On-Line Streaming Clustering* (Ibrahim, Du y Keller, 2018) sobre el
+  encaje del UMAP paramétrico, con una ventana movible de 1000 espigas. PCM inicializa; cada espiga entra a la
+  gaussiana más cercana por distancia de Mahalanobis si está a menos de `Td` = 2.5, y si no va al historial de
+  anomalías, del que nacen grupos nuevos (`r params$erolsc`, de `scripts/etiqueta_erolsc.sh`).
+- **Propagación (dev)** (rama `dev`): propagación de etiquetas por vecindad sobre una ventana de espigas
+  recientes, con nacimientos y auditorías por HDBSCAN (`r params$dev`, de `scripts/etiqueta_carpeta.py`).
+- **UMAP + HDBSCAN offline**: UMAP no paramétrico (`uwot`) sobre las formas de onda estandarizadas y HDBSCAN
+  (`dbscan`) sobre el encaje, viendo todo el canal a la vez. Es el mismo etiquetado de referencia de
+  `comparacion_cuatro_etiquetados.Rmd` (se lee de `umap_hdbscan_labels.csv`; se calcula si no existe).
+
+Los dos métodos en línea usan el mismo UMAP paramétrico (primeras 2000 espigas de cada canal, lotes de 200);
+sólo cambia el agrupador. La comparación se hace de dos formas:
+
+1. **Contra UMAP + HDBSCAN**: ¿cuánto se parece cada método en línea a lo que haría el agrupador offline usual?
+2. **Contra la verdad de campo**: ¿cuál acierta más? Aquí UMAP + HDBSCAN entra como un tercer método.
+
+Parecerse a HDBSCAN y acertar no son lo mismo; la sección 3.3 los pone lado a lado.
+
+# Datos
+
+```{r}
+res %>% filter(metodo == "EROLSC") %>%
+  left_join(cref %>% filter(metodo == "EROLSC") %>% select(canal, unidades_ref, ruido_ref), by = "canal") %>%
+  transmute(Canal = canal, Espigas = format(espigas, big.mark = ","), `Neuronas verdaderas` = neuronas_verdad,
+            Evaluadas = evaluadas, `Unidades UMAP + HDBSCAN` = unidades_ref, `Ruido UMAP + HDBSCAN` = pct(ruido_ref)) %>%
+  knitr::kable()
+```
+
+`r n_canales` canales, `r format(sum(res$espigas[res$metodo == "EROLSC"]), big.mark = ",")` espigas. Las medidas
+son las de `comparacion_cuatro_etiquetados.Rmd`: ARI, ARI tolerante (una neurona partida en unidades puras no es
+error), pureza y la exactitud por neurona de SpikeForest; una neurona con al menos `r params$min_verdad` espigas
+es **recuperada** si su exactitud es ≥ `r params$umbral`.
+
+# Resultados
+
+## Contra UMAP + HDBSCAN
+
+Cada método en línea frente a UMAP + HDBSCAN como si éste fuera la verdad. Las espigas que HDBSCAN deja como ruido
+no tienen referencia y no se evalúan; *ARI completo* las incluye (el ruido de cada etiquetado cuenta como una
+clase más). Una «unidad reproducida» es una unidad de HDBSCAN (con al menos `r params$min_verdad` espigas) que el
+método reproduce con exactitud ≥ `r params$umbral`.
+
+```{r}
+cref %>%
+  group_by(metodo) %>%
+  summarise(`ARI mediano` = num(median(ari), 3), `ARI medio` = num(mean(ari), 3),
+            `ARI tolerante mediano` = num(median(ari_tolerante), 3),
+            `ARI completo mediano` = num(median(ari_completo), 3),
+            `Unidades de HDBSCAN reproducidas` = paste(sum(recuperadas), "de", sum(evaluadas)),
+            `Exactitud mediana` = num(median(exactitud_mediana, na.rm = TRUE), 3), .groups = "drop") %>%
+  rename(`Método` = metodo) %>%
+  knitr::kable()
+```
+
+```{r}
+cref %>%
+  ggplot(aes(metodo, ari, group = canal)) +
+  geom_line(colour = "grey75") +
+  geom_point(aes(colour = metodo), size = 2) +
+  scale_colour_manual(values = colores, guide = "none") +
+  labs(x = NULL, y = "ARI contra UMAP + HDBSCAN", title = "Parecido a UMAP + HDBSCAN; cada línea es un canal")
+```
+
+```{r}
+pareada_ref <- function(col) {
+  a <- cref %>% filter(metodo == "EROLSC") %>% arrange(canal) %>% pull(!!col)
+  b <- cref %>% filter(metodo == "Propagación (dev)") %>% arrange(canal) %>% pull(!!col)
+  p <- if (length(a) >= 5 && any(a != b)) wilcox.test(a, b, paired = TRUE, exact = FALSE)$p.value else NA
+  tibble(Medida = col, `Canales en que EROLSC se parece más` = paste(sum(a > b), "de", length(a)),
+         `Diferencia mediana (EROLSC − dev)` = num(median(a - b), 3), `Wilcoxon pareado, p` = p_fmt(p))
+}
+bind_rows(pareada_ref("ari"), pareada_ref("ari_tolerante"), pareada_ref("ari_completo")) %>%
+  mutate(Medida = recode(Medida, ari = "ARI", ari_tolerante = "ARI tolerante", ari_completo = "ARI completo")) %>%
+  knitr::kable()
+```
+
+## Contra la verdad de campo
+
+```{r}
+res %>%
+  group_by(metodo) %>%
+  summarise(`Recuperadas` = sum(recuperadas), `Recuperadas (tolerante)` = sum(recuperadas_tol),
+            `De` = sum(evaluadas),
+            `ARI mediano` = num(median(ari), 3), `ARI medio` = num(mean(ari), 3),
+            `ARI tolerante mediano` = num(median(ari_tolerante), 3),
+            `Pureza mediana` = num(median(pureza, na.rm = TRUE), 3),
+            `Exactitud mediana (neuronas)` = num(median(neu$exactitud[neu$metodo == first(metodo)]), 3),
+            `Unidades por canal (mediana)` = median(unidades_05),
+            `Ruido (mediana)` = pct(median(ruido)), .groups = "drop") %>%
+  rename(`Método` = metodo) %>%
+  knitr::kable()
+```
+
+```{r}
+res %>%
+  ggplot(aes(metodo, ari, group = canal)) +
+  geom_line(colour = "grey75") +
+  geom_point(aes(colour = metodo), size = 2) +
+  scale_colour_manual(values = colores, guide = "none") +
+  labs(x = NULL, y = "ARI contra la verdad", title = "Cada línea es un canal")
+```
+
+```{r}
+pareada <- function(a_met, b_met, col) {
+  a <- res %>% filter(metodo == a_met) %>% arrange(canal) %>% pull(!!col)
+  b <- res %>% filter(metodo == b_met) %>% arrange(canal) %>% pull(!!col)
+  p <- if (length(a) >= 5 && any(a != b)) wilcox.test(a, b, paired = TRUE, exact = FALSE)$p.value else NA
+  tibble(`Comparación` = paste(a_met, "frente a", b_met), Medida = col,
+         `Canales en que el primero es mayor` = paste(sum(a > b), "de", length(a)),
+         `Diferencia mediana` = num(median(a - b), 3), `Wilcoxon pareado, p` = p_fmt(p))
+}
+bind_rows(
+  pareada("EROLSC", "Propagación (dev)", "ari"), pareada("EROLSC", "UMAP + HDBSCAN", "ari"),
+  pareada("Propagación (dev)", "UMAP + HDBSCAN", "ari"),
+  pareada("EROLSC", "Propagación (dev)", "exactitud_mediana"), pareada("EROLSC", "UMAP + HDBSCAN", "exactitud_mediana"),
+  pareada("Propagación (dev)", "UMAP + HDBSCAN", "exactitud_mediana")) %>%
+  mutate(Medida = recode(Medida, ari = "ARI", exactitud_mediana = "Exactitud mediana")) %>%
+  knitr::kable()
+```
+
+La prueba de Wilcoxon solo se calcula con al menos cinco canales («n/c» = no calculada).
+
+```{r}
+neu %>%
+  ggplot(aes(metodo, exactitud, fill = metodo)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  geom_hline(yintercept = params$umbral, linetype = "dashed") +
+  scale_fill_manual(values = colores, guide = "none") +
+  labs(x = NULL, y = "Exactitud", title = "Exactitud de cada neurona verdadera evaluada",
+       subtitle = paste("Línea discontinua: umbral de recuperación", params$umbral))
+```
+
+```{r}
+neu %>%
+  select(canal, neurona, espigas, metodo, exactitud) %>%
+  pivot_wider(names_from = metodo, values_from = exactitud) %>%
+  ggplot(aes(`Propagación (dev)`, EROLSC, size = espigas)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(alpha = 0.5, colour = colores[["EROLSC"]]) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Exactitud con propagación (dev)", y = "Exactitud con EROLSC", size = "Espigas",
+       title = "Cada punto es una neurona (sobre la diagonal, EROLSC acierta más)")
+```
+
+## Parecerse a HDBSCAN frente a acertar
+
+Para cada canal y método en línea, el ARI contra UMAP + HDBSCAN (eje x) y contra la verdad (eje y). Si parecerse a
+HDBSCAN fuera lo mismo que acertar, los puntos seguirían la diagonal.
+
+```{r, fig.height = 5}
+cref %>% select(canal, metodo, ari_contra_ref = ari) %>%
+  left_join(res %>% select(canal, metodo, ari_contra_verdad = ari), by = c("canal", "metodo")) %>%
+  ggplot(aes(ari_contra_ref, ari_contra_verdad, colour = metodo)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(size = 2.5) +
+  geom_text(aes(label = sub("canal_", "", canal)), nudge_y = 0.02, size = 3, show.legend = FALSE) +
+  scale_colour_manual(values = colores) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "ARI contra UMAP + HDBSCAN", y = "ARI contra la verdad", colour = NULL,
+       title = "Cada punto es un canal; el número, el canal") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+cref %>% select(canal, metodo, ari_contra_ref = ari) %>%
+  left_join(res %>% select(canal, metodo, ari_contra_verdad = ari), by = c("canal", "metodo")) %>%
+  group_by(metodo) %>%
+  summarise(`Correlación de Spearman entre canales` = num(cor(ari_contra_ref, ari_contra_verdad, method = "spearman"), 2),
+            .groups = "drop") %>%
+  rename(`Método` = metodo) %>%
+  knitr::kable()
+```
+
+## Segmentación
+
+```{r}
+res %>%
+  ggplot(aes(canal, unidades_05, fill = metodo)) +
+  geom_col(position = "dodge") +
+  geom_point(data = res %>% filter(metodo == "EROLSC"), aes(canal, evaluadas), inherit.aes = FALSE,
+             shape = 4, size = 3) +
+  scale_fill_manual(values = colores) +
+  labs(x = "Canal", y = "Unidades (≥ 0.5 % de las espigas)", fill = NULL,
+       title = "Unidades encontradas por método (× = neuronas verdaderas evaluadas)") +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Los encajes, canal por canal
+
+Las mismas espigas sobre el UMAP offline de R, coloreadas por la verdad y por cada método (las 10 unidades con
+más espigas de cada etiquetado con color propio, el resto en gris claro, el ruido en negro; los colores no se
+corresponden entre paneles). Debajo, qué espigas asigna cada método a la unidad correcta (la que corresponde
+mayoritariamente a su neurona verdadera; partir una neurona no cuenta como error).
+
+```{r encajes, results = "asis", fig.width = 11, fig.height = 3.4}
+for (canal in names(graficas)) {
+  cat("\n\n### ", canal, "\n\n", sep = "")
+  g <- graficas[[canal]]
+  print(
+    ggplot(g$etiquetas %>% mutate(etiquetado = factor(etiquetado, levels = c("Verdad", metodos))),
+           aes(x, y, colour = color)) +
+      geom_point(size = 0.25, alpha = 0.6) +
+      facet_wrap(~etiquetado, nrow = 1) +
+      scale_colour_manual(values = colores_et, guide = "none") +
+      labs(x = NULL, y = NULL, title = paste0(canal, ": etiquetas sobre el encaje UMAP (R)")) +
+      theme_minimal(base_size = 10) +
+      theme(axis.text = element_blank(), panel.grid = element_blank())
+  )
+  cat("\n\n")
+  print(
+    ggplot(g$aciertos %>% mutate(metodo = factor(metodo, levels = metodos)), aes(x, y, colour = acierto)) +
+      geom_point(size = 0.25, alpha = 0.6) +
+      facet_wrap(~metodo, nrow = 1) +
+      scale_colour_manual(values = c(correcta = "grey75", error = "#d62728", ruido = "black"), drop = FALSE) +
+      guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+      labs(x = NULL, y = NULL, colour = NULL, title = paste0(canal, ": aciertos sobre el encaje UMAP (R)")) +
+      theme_minimal(base_size = 10) +
+      theme(axis.text = element_blank(), panel.grid = element_blank(), legend.position = "right")
+  )
+  cat("\n\n")
+}
+```
+
+## Detalle por canal
+
+```{r}
+res %>%
+  left_join(cref %>% select(canal, metodo, ari_ref = ari), by = c("canal", "metodo")) %>%
+  transmute(Canal = canal, `Método` = metodo, `ARI verdad` = num(ari, 3),
+            `ARI UMAP + HDBSCAN` = ifelse(is.na(ari_ref), "—", num(ari_ref, 3)),
+            `ARI tol.` = num(ari_tolerante, 3), Pureza = num(pureza, 3), Unidades = unidades_05, Ruido = pct(ruido),
+            Recuperadas = paste(recuperadas, "de", evaluadas), `Exactitud med.` = num(exactitud_mediana, 3)) %>%
+  arrange(Canal, `Método`) %>%
+  knitr::kable()
+```
+
+# Notas para interpretar
+
+- **Mismo UMAP, otro agrupador.** Los dos métodos en línea parten del mismo UMAP paramétrico con la misma
+  configuración, pero cada corrida entrena su propia red: los encajes no son idénticos punto a punto, y parte de la
+  diferencia en un canal puede venir del encaje y no del agrupador.
+- **En línea frente a offline.** EROLSC y la propagación etiquetan cada espiga con lo visto hasta ese momento;
+  UMAP + HDBSCAN ve todo el canal a la vez. Tomarlo como referencia mide cuánto se acerca un método en línea al
+  procedimiento offline usual, no cuánto acierta.
+- **Ruido.** HDBSCAN deja como ruido las espigas que no agrupa (esas espigas no se evalúan en la sección 3.1);
+  EROLSC deja como anomalía las que caen a más de `Td` = 2.5 de toda gaussiana (≈ 8 %); la propagación asigna
+  casi todas.
+- **Calibración de EROLSC.** Sus parámetros (`Td` 2.5, `Tn` 0.5, `M` 50) se eligieron con
+  `examples/sonda_de_erolsc.rs` sobre estos mismos 16 canales y contra esta misma verdad, así que su ventaja aquí
+  es optimista: habría que confirmarla en otro registro.
+- **Un canal de un registro multicanal.** Dos neuronas pueden ser indistinguibles en un canal aislado para
+  cualquier método; los valores absolutos miden también la dificultad del escenario.

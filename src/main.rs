@@ -44,6 +44,8 @@ struct Opciones {
     cargar: bool,
     /// Puntos del encaje en la ventana movible de EROLSC.
     ventana: usize,
+    /// CSV donde escribir la etiqueta de cada forma de onda.
+    etiquetas: Option<String>,
 }
 
 const USO: &str = "\
@@ -54,6 +56,9 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --train <n>       formas de onda de entrenamiento (por defecto 400)
   --lote <n>        tamaño de lote (por defecto 200)
   --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 1000)
+  --etiquetas <ruta> escribe en <ruta> la etiqueta EROLSC de cada forma de onda, una
+                    por línea y en el orden del CSV (−1 = anomalía), incluidas las de
+                    entrenamiento, que se agrupan primero
 ";
 
 fn opciones() -> Result<Opciones, Box<dyn Error>> {
@@ -65,6 +70,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         modelo: None,
         cargar: false,
         ventana: erolsc::VENTANA,
+        etiquetas: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -72,6 +78,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--cargar" => o.cargar = true,
             "--train" => o.train_size = args.next().ok_or("--train necesita un número")?.parse()?,
             "--lote" => o.batch_size = args.next().ok_or("--lote necesita un número")?.parse()?,
+            "--etiquetas" => o.etiquetas = Some(args.next().ok_or("--etiquetas necesita una ruta")?),
             "--ventana" => o.ventana = args.next().ok_or("--ventana necesita un número")?.parse()?,
             "-h" | "--help" => {
                 print!("{USO}");
@@ -233,12 +240,12 @@ fn corre() -> Result<(), Box<dyn Error>> {
         (m, norm, norm_entrada)
     };
 
-    buffer_crudo.clear();
+    let entrenamiento = std::mem::take(&mut buffer_crudo);
 
     let mut total_puntos: Vec<(f32, f32)> = Vec::new();
 
     //Procesa un lote: encaje, normalización, EROLSC y gráfica.
-    let procesa_lote = |lote: &[Vec<f64>], i: usize, agr: &mut Erolsc, total: &mut Vec<(f32, f32)>| -> Result<(), Box<dyn Error>> {
+    let procesa_lote = |lote: &[Vec<f64>], i: usize, agr: &mut Erolsc, total: &mut Vec<(f32, f32)>| -> Result<Vec<i64>, Box<dyn Error>> {
         //`fast-umap` NO normaliza en `transform`, aunque sí lo hace al entrenar.
         //Sin esta línea la red recibe datos crudos y devuelve coordenadas cinco
         //órdenes de magnitud fuera del encaje.
@@ -279,8 +286,39 @@ fn corre() -> Result<(), Box<dyn Error>> {
         Chart::new_with_y_range(230, 120, 0.0, 1.0, 0.0, 1.0)
             .lineplot(&Shape::Points(&puntos))
             .display();
-        Ok(())
+        Ok(etiquetas)
     };
+
+    //Etiqueta de cada forma de onda, en orden (sólo con --etiquetas). Las que
+    //llegaron antes de que la ventana inicial se llenara salen SIN_CLASIFICAR del
+    //lote; en cuanto EROLSC se inicializa, se rellenan con la etiqueta que les dio
+    //la inicialización (siguen en la ventana).
+    let mut todas: Vec<i64> = Vec::new();
+    let mut anota = |etiquetas: Vec<i64>, agr: &Erolsc| {
+        if opts.etiquetas.is_none() {
+            return;
+        }
+        todas.extend(etiquetas);
+        if agr.inicializado() {
+            let base = todas.len() - agr.n_ventana();
+            for (k, (_, e)) in agr.ventana().enumerate() {
+                if todas[base + k] == erolsc::SIN_CLASIFICAR {
+                    todas[base + k] = e;
+                }
+            }
+        }
+    };
+
+    //Con --etiquetas, las formas de onda de entrenamiento también se agrupan, las
+    //primeras, para que cada fila del CSV tenga su etiqueta.
+    if opts.etiquetas.is_some() {
+        for (k, lote) in entrenamiento.chunks(opts.batch_size).enumerate() {
+            let i = (k * opts.batch_size + lote.len()).saturating_sub(1);
+            let e = procesa_lote(lote, i, &mut agrupador, &mut total_puntos)?;
+            anota(e, &agrupador);
+        }
+    }
+    drop(entrenamiento);
 
     let mut ultimo = 0usize;
     for (i, result) in records { // seguimos con el archivo
@@ -289,7 +327,8 @@ fn corre() -> Result<(), Box<dyn Error>> {
         ultimo = i;
 
         if buffer_crudo.len() == opts.batch_size {
-            procesa_lote(&buffer_crudo, i, &mut agrupador, &mut total_puntos)?;
+            let e = procesa_lote(&buffer_crudo, i, &mut agrupador, &mut total_puntos)?;
+            anota(e, &agrupador);
             buffer_crudo.clear();
         }
     }
@@ -298,12 +337,23 @@ fn corre() -> Result<(), Box<dyn Error>> {
     //formas de onda del final del fichero no se procesaban nunca.
     if !buffer_crudo.is_empty() {
         println!("--- Último lote, incompleto: {} formas ---", buffer_crudo.len());
-        procesa_lote(&buffer_crudo, ultimo, &mut agrupador, &mut total_puntos)?;
+        let e = procesa_lote(&buffer_crudo, ultimo, &mut agrupador, &mut total_puntos)?;
+        anota(e, &agrupador);
     }
 
     println!("\nTotal de puntos procesados: {}", total_puntos.len());
     for (id, media, n) in agrupador.grupos() {
         println!("  grupo {id}: centro ({:.3}, {:.3}) · {n} puntos en la ventana", media[0], media[1]);
+    }
+
+    if let Some(ruta) = &opts.etiquetas {
+        //Un archivo más corto que la ventana nunca inicializa: todo es anomalía.
+        let texto: String = todas
+            .iter()
+            .map(|&e| format!("{}\n", if e == erolsc::SIN_CLASIFICAR { erolsc::RUIDO } else { e }))
+            .collect();
+        std::fs::write(ruta, texto)?;
+        println!("{} etiquetas escritas en {ruta}", todas.len());
     }
 
     Ok(())
