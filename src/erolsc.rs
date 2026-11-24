@@ -1,6 +1,6 @@
 //! **EROLSC** — *Extended Robust On-Line Streaming Clustering* (Ibrahim, Du y
 //! Keller, IPMU 2018, CCIS 853, pp. 467–478), aplicado sobre el encaje UMAP con
-//! una **ventana movible** de `ventana` puntos (por defecto 4000).
+//! una **ventana movible** de `ventana` puntos (por defecto 2000).
 //!
 //! # El algoritmo del artículo (Fig. 1)
 //!
@@ -69,7 +69,7 @@ pub const RUIDO: i64 = -1;
 pub const SIN_CLASIFICAR: i64 = -2;
 
 /// Tamaño por defecto de la ventana movible, `S` en el artículo.
-pub const VENTANA: usize = 4000;
+pub const VENTANA: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub struct Parametros {
@@ -77,8 +77,9 @@ pub struct Parametros {
     pub ventana: usize,
     /// `M`: puntos mínimos para que un grupo sea gaussiana.
     pub min_puntos: usize,
-    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 2.25 deja
-    /// fuera ≈ 8 % de una gaussiana (χ²₂ = 5.06).
+    /// `Td`: umbral de distancia de Mahalanobis. Con 2 dimensiones, 4.5 deja
+    /// fuera ≈ 0.004 % de una gaussiana (χ²₂ = 20.25): casi sólo son anomalías
+    /// las espigas lejos de toda unidad.
     pub umbral_distancia: f64,
     /// `Tn`: pertenencia posibilística mínima a algún grupo para no ser anomalía.
     pub umbral_pertenencia: f64,
@@ -94,36 +95,40 @@ pub struct Parametros {
     pub semilla: u64,
 }
 
-/// Valores calibrados con `examples/sonda_de_erolsc.rs` sobre los encajes de
-/// los 16 canales de `monocanal` (híbrido de Janelia con deriva, 5–11 unidades
-/// por canal; encaje de UMAP con semilla 9999, el mismo que usa la rama dev),
-/// contra las etiquetas verdaderas, con lotes de 200. ARI contando las
-/// anomalías de EROLSC como una clase más; «validación cruzada» = cada canal
-/// evaluado con los `Td`, `Tn` y `M` que mejor ARI medio dan en los otros 15.
+/// Valores calibrados con `examples/sonda_de_erolsc.rs` sobre registros
+/// SIMULADOS con MEArec (`scripts/simula_monocanal_mearec.py`, semilla maestra 1:
+/// 5 registros con canales, 36 canales evaluables), contra su verdad, sobre el
+/// encaje de UMAP con semilla 9999 (el mismo que usa dev) y lotes de 200. ARI
+/// contando las anomalías como una clase; cada registro pesa lo mismo.
 ///
-/// | Ventana | Td   | Tn  | M   | ARI medio | Validación cruzada | Anomalías |
-/// |---------|------|-----|-----|-----------|--------------------|-----------|
-/// | 1000    | 3.0  | 0.1 | 20  | 0.127     | —                  | 3 %       |
-/// | 1000    | 2.5  | 0.5 | 50  | 0.252     | 0.188–0.234        | 8 %       |
-/// | 2000    | 2.5  | 0.6 | 50  | 0.305     | 0.279              | 9 %       |
-/// | 4000    | 2.25 | 0.5 | 200 | 0.315     | 0.302              | 13 %      |
-/// | 8000    | 2.5  | 0.6 | 200 | 0.295     | 0.295              | 13 %      |
+/// | Ventana | mejor Td, Tn, M  | ARI (media de registros) |
+/// |---------|------------------|--------------------------|
+/// | 500     | 3.5, 0.5, 20     | 0.487                    |
+/// | 1000    | 3.0, 0.5, 50     | 0.489                    |
+/// | 1500    | 4.5, 0.3, 100    | 0.506                    |
+/// | 2000    | 4.5–6, 0.3–0.7   | 0.514–0.524              |
+/// | 3000    | 5.0, 0.3, 100    | 0.411                    |
+/// | 4000    | 3.5, 0.5, 100    | 0.382                    |
 ///
-/// La primera fila son los valores de partida; las demás, lo mejor de cada
-/// ventana (para 1000, la validación cruzada da 0.188 con la rejilla amplia y
-/// 0.234 con la reducida alrededor del óptimo). Con la ventana 4000 la
-/// validación cruzada elige la misma combinación en 14 de 16 canales, y `M`
-/// queda en el interior de la rejilla (100: 0.304, 400: 0.280, 800: 0.178).
-/// En los mismos canales y el mismo encaje, el agrupador de `dev` da ARI medio
-/// 0.171. Agrupar un canal entero (~50 000 espigas) tarda menos de un segundo
-/// con 4000. Todo sale de un solo registro: falta confirmarlo en otro.
+/// La ventana de 2000 gana en 4 de 5 particiones dejando un registro fuera; con
+/// 3000 o más, los registros de tasas bajas (canales de 2 000–4 000 espigas)
+/// apenas llenan la ventana. Con 2000, `Td` entre 4 y 6, `Tn` y `M` casi no
+/// mueven el resultado; se eligió Td 4.5, Tn 0.3, M 100, dentro de la meseta y
+/// lejos del borde de la rejilla. Con `Td` tan alto casi no quedan anomalías
+/// (0.6 %).
+///
+/// Antes se calibró con los 16 canales del registro híbrido de `monocanal`
+/// (ventana 4000, Td 2.25, Tn 0.5, M 200): en registros simulados que no se
+/// usaron para elegirlos daba ARI 0.357, por debajo de la propagación de dev
+/// (0.493). La validación de estos valores se hace con registros simulados con
+/// otra semilla maestra (2), que no se miraron al elegirlos.
 impl Default for Parametros {
     fn default() -> Self {
         Parametros {
             ventana: VENTANA,
-            min_puntos: 200,
-            umbral_distancia: 2.25,
-            umbral_pertenencia: 0.5,
+            min_puntos: 100,
+            umbral_distancia: 4.5,
+            umbral_pertenencia: 0.3,
             c_inicial: 10,
             c_anomalias: 10,
             factor_dispersion: 2.0,
@@ -823,8 +828,8 @@ mod pruebas {
     }
 
     #[test]
-    fn la_ventana_por_defecto_es_4000() {
-        assert_eq!(Parametros::default().ventana, 4000);
+    fn la_ventana_por_defecto_es_2000() {
+        assert_eq!(Parametros::default().ventana, 2000);
         assert!(Parametros::default().valida().is_ok());
     }
 

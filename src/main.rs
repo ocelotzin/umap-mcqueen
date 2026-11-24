@@ -65,7 +65,7 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
   --semilla <n>     semilla del entrenamiento: con los mismos datos y la misma
                     semilla salen los mismos pesos (por defecto 9999). Se guarda
                     en el manifiesto del modelo
-  --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 4000)
+  --ventana <n>     ventana movible de EROLSC sobre el encaje (por defecto 2000)
   --etiquetas <ruta> escribe en <ruta> la etiqueta EROLSC de cada forma de onda, una
                     por línea y en el orden del CSV (−1 = anomalía), incluidas las de
                     entrenamiento, que se agrupan primero
