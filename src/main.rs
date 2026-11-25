@@ -19,7 +19,7 @@ use umap_mcqueen::agrupador::Agrupador;
 //El núcleo es la biblioteca `umap_mcqueen` (src/lib.rs): el guardado y la carga
 //verificada del modelo, la normalización con referencia fija, el simulador de
 //espigas y la configuración de UMAP. Esta CLI la usa, y `tdc_umap` también.
-use umap_mcqueen::configuracion;
+use umap_mcqueen::configuracion_en;
 use umap_mcqueen::modelo;
 use umap_mcqueen::normaliza::{Normalizador, NormalizadorDeEntrada};
 use umap_mcqueen::spikesim::GeneradorMezclaT;
@@ -73,6 +73,7 @@ struct Opciones {
     etiquetas: Option<String>, // CSV donde escribir una etiqueta por forma de onda
     encaje: Option<String>, // CSV donde escribir las coordenadas de cada forma de onda
     separacion_hdbscan: bool, // separar con HDBSCAN sobre el encaje (lo de antes)
+    dims: Option<usize>, // dimensiones del encaje (None: 2, o las del modelo con --cargar)
 }
 
 const USO: &str = "\
@@ -96,8 +97,13 @@ uso: umap-mcqueen <Waveforms.csv> [opciones]
                             del último lote incompleto, y la auditoría del agrupador corre
                             en este mismo hilo (resultado reproducible)
   --encaje <ruta>           escribe en <ruta> las coordenadas normalizadas del encaje de
-                            cada forma de onda (x,y), una por línea y en el mismo orden
+                            cada forma de onda (x,y[,z…]), una por línea y en el mismo orden
                             que --etiquetas, que es obligatoria con esta opción
+  --dims <n>                dimensiones del encaje de UMAP (por defecto 2; con --cargar, las
+                            del modelo guardado). El agrupador trabaja en cualquier
+                            dimensión; la gráfica del encaje sólo se dibuja en 2D, todo lo
+                            demás (proporciones, raster, formas de onda, galería) se
+                            muestra igual
   --separacion-hdbscan      la auditoría separa unidades con HDBSCAN sobre el encaje,
                             como antes, en vez de con la mezcla de gaussianas sobre
                             las formas de onda de cada unidad (ver src/mezcla.rs)
@@ -121,6 +127,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
         etiquetas: None,
         encaje: None,
         separacion_hdbscan: false,
+        dims: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -135,6 +142,7 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
             "--etiquetas" => o.etiquetas = Some(args.next().ok_or("--etiquetas necesita una ruta")?),
             "--encaje" => o.encaje = Some(args.next().ok_or("--encaje necesita una ruta")?),
             "--separacion-hdbscan" => o.separacion_hdbscan = true,
+            "--dims" => o.dims = Some(args.next().ok_or("--dims necesita un número natural")?.parse()?),
             "-h" | "--help" => {
                 print!("{USO}");
                 std::process::exit(0);
@@ -151,6 +159,9 @@ fn opciones() -> Result<Opciones, Box<dyn Error>> {
     }
     if o.encaje.is_some() && o.etiquetas.is_none() {
         return Err("--encaje necesita --etiquetas (sólo así se procesan todas las formas de onda, en orden)".into());
+    }
+    if o.dims.is_some_and(|d| d < 1) {
+        return Err("--dims necesita al menos 1 dimensión".into());
     }
     Ok(o)
 }
@@ -183,7 +194,23 @@ fn main_err() -> Result<(), Box<dyn Error>> {
 
     //Este es el buffer que servirá para almacenar lotes
     let mut buffer_crudo: Vec<Vec<f64>> = Vec::new(); // para datos crudos
-    let config = configuracion(opts.semilla);
+    //Con --cargar y sin --dims, las dimensiones son las del modelo guardado.
+    let dims = match (opts.dims, &opts.modelo) {
+        (Some(d), _) => d,
+        (None, Some(base)) if opts.cargar => {
+            let ruta = modelo::RutasDelModelo::de(base).manifiesto;
+            let texto = std::fs::read_to_string(&ruta)
+                .map_err(|e| format!("no se pudo leer el manifiesto {}: {e}", ruta.display()))?;
+            serde_json::from_str::<modelo::Manifiesto>(&texto)?.n_components
+        }
+        _ => 2,
+    };
+    let dibuja_encaje = dims == 2;
+    println!(
+        "Encaje de UMAP en {dims} dimensiones{}",
+        if dibuja_encaje { "" } else { " (la gráfica del encaje sólo se dibuja en 2D)" }
+    );
+    let config = configuracion_en(opts.semilla, dims);
 
     //Cada forma de onda toma la etiqueta de sus vecinas recientes en el encaje
     //(propagación por vecindad): lo mismo que usa tdc_umap (ver
@@ -332,9 +359,9 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     //Las formas de onda de entrenamiento se guardan: con --etiquetas también se etiquetan.
     let entrenamiento = std::mem::take(&mut buffer_crudo);
 
-    let mut total_puntos: Vec<(f32, f32)> = Vec::new();
+    let mut total_puntos: Vec<Vec<f32>> = Vec::new();
     //Procesa un lote: encaje, normalización, agrupador y gráfica.
-    let procesa_lote = |lote: &[Vec<f64>], i: usize, etq: &mut Agrupador, total: &mut Vec<(f32, f32)>,
+    let procesa_lote = |lote: &[Vec<f64>], i: usize, etq: &mut Agrupador, total: &mut Vec<Vec<f32>>,
                         conteo_total: &mut BTreeMap<i64, usize>,
                         historial: &mut Vec<BTreeMap<i64, usize>>,
                         resumen_formas: &mut vista::ResumenFormas| {
@@ -354,7 +381,7 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         //el agrupador trabaje en una escala fija.
         let puntos_f32: Vec<Vec<f32>> = embedding_normalizado
             .iter()
-            .map(|fila| vec![fila[0] as f32, fila[1] as f32])
+            .map(|fila| fila.iter().map(|&v| v as f32).collect())
             .collect();
 
         //Una etiqueta por forma de onda (ETIQUETA_RUIDO = -1 si no tiene unidad).
@@ -385,23 +412,29 @@ fn main_err() -> Result<(), Box<dyn Error>> {
         historial.push(conteo_lote);
         resumen_formas.agrega(lote, &etiquetas);
 
-        let puntos: Vec<(f32, f32)> = embedding_normalizado // Para graficar el embedding,
-            .iter()
-            .map(|fila| (fila[0] as f32, fila[1] as f32))
-            .collect();
+        total.extend(puntos_f32);
 
-        total.extend(puntos.clone());
-
-        //El encaje (un color por etiqueta) y, a su lado, el raster del lote con
-        //los mismos colores. `i` es el índice de la última forma de onda del lote.
-        let encaje = vista::encaje_coloreado(&puntos, &etiquetas, ANCHO_ENCAJE_PX, ALTO_ENCAJE_PX);
+        //El raster del lote (un color por etiqueta) y, debajo, las formas de onda
+        //crudas del lote en sus colores. `i` es el índice de la última forma de onda del lote.
         let primera = (i + 1).saturating_sub(etiquetas.len());
         let mut derecha = vista::raster_lote(&etiquetas, primera, ANCHO_RASTER, FILAS_RASTER);
-        //Debajo del raster, las formas de onda crudas del lote en sus colores.
         derecha.push(String::new());
         derecha.extend(vista::formas_de_onda(lote, &etiquetas, ANCHO_FORMAS_PX, ALTO_FORMAS_PX));
-        println!("--- Embedding, raster y formas de onda en el índice {} ---", i);
-        print!("{}", vista::lado_a_lado(&encaje, &derecha, 3));
+        if dibuja_encaje {
+            //En 2D, a la izquierda, el encaje con los mismos colores.
+            let puntos: Vec<(f32, f32)> = embedding_normalizado
+                .iter()
+                .map(|fila| (fila[0] as f32, fila[1] as f32))
+                .collect();
+            let encaje = vista::encaje_coloreado(&puntos, &etiquetas, ANCHO_ENCAJE_PX, ALTO_ENCAJE_PX);
+            println!("--- Embedding, raster y formas de onda en el índice {} ---", i);
+            print!("{}", vista::lado_a_lado(&encaje, &derecha, 3));
+        } else {
+            println!("--- Raster y formas de onda en el índice {} ---", i);
+            for linea in &derecha {
+                println!("{linea}");
+            }
+        }
         etiquetas
     };
 
@@ -463,8 +496,10 @@ fn main_err() -> Result<(), Box<dyn Error>> {
     if let Some(ruta) = &opts.encaje {
         //`total_puntos` se llena en el mismo orden que `todas_las_etiquetas`.
         let mut texto = String::with_capacity(total_puntos.len() * 20);
-        for (x, y) in &total_puntos {
-            texto.push_str(&format!("{x},{y}\n"));
+        for p in &total_puntos {
+            let campos: Vec<String> = p.iter().map(|v| v.to_string()).collect();
+            texto.push_str(&campos.join(","));
+            texto.push('\n');
         }
         std::fs::write(ruta, texto)?;
         println!("Encaje: {} formas de onda en {}", total_puntos.len(), ruta);

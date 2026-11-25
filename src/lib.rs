@@ -23,8 +23,14 @@ pub mod spikesim;
 //aristas de cada época. Misma configuración, mismos datos y misma semilla dan
 //los mismos pesos; el manifiesto la guarda para que se sepa cuál fue.
 pub fn configuracion(semilla: u64) -> UmapConfig {
+    configuracion_en(semilla, 2)
+}
+
+/// La misma configuración con `dims` dimensiones de salida (`--dims` de la CLI).
+/// El agrupador trabaja en cualquier dimensión; la gráfica del encaje, sólo en 2D.
+pub fn configuracion_en(semilla: u64, dims: usize) -> UmapConfig {
     UmapConfig {
-        n_components: 2,
+        n_components: dims,
         hidden_sizes: vec![128],
         seed: semilla,
         graph: GraphParams {
